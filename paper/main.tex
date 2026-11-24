@@ -429,10 +429,12 @@ sparse, noisy far depth \\
 \end{table}
 
 The range limit is soft. We use the wide-field \(2{\times}2\)-binned depth
-mode for its large field of view. Its specified operating range is
-\(0.25\)--\(2.88\,\)m~\cite{msft2024kinectspec}, but well-reflecting
-surfaces return valid depth beyond it: our recordings contain depth up to
-\(6.86\,\)m. With distance, fewer surfaces return enough light, so far depth
+mode for its large field of view. Its specified operating range of
+\(0.25\)--\(2.88\,\)m is the range in which the manufacturer guarantees the
+accuracy (random error \(\le17\,\)mm for \(15\)--\(95\,\%\)
+reflectivity)~\cite{msft2024kinectspec}. It is not a hard limit: the sensor
+reports depth beyond it, depending on reflectivity, and our recordings contain
+valid depth up to \(6.86\,\)m. With distance, fewer surfaces return enough light, so far depth
 becomes sparse and noisier. The pipeline accepts depth up to \(8\,\)m. The data weight of
 Variant~B (Eq.~\eqref{eq:wdata}) reduces the weight of distant measurements,
 and its decay term limits how far near-field corrections reach into the
