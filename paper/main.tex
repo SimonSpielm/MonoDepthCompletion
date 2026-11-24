@@ -220,44 +220,132 @@ simpler route of masking humans in image space before integration.
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
-  node distance=4mm and 6mm,
+  node distance=4mm and 10mm,
   blk/.style={draw, rounded corners=2pt, align=center, font=\footnotesize,
               minimum height=11mm, text width=24mm, fill=gray!8},
   aux/.style={draw, dashed, rounded corners=2pt, align=center,
               font=\scriptsize, text width=24mm, minimum height=8mm},
   arr/.style={-{Latex[length=2mm]}, thick},
   darr/.style={-{Latex[length=1.6mm]}, dashed}]
-  \node[blk] (cam) {Azure Kinect\\RGB \(1280{\times}720\)\\depth reg.\ to color};
-  \node[blk, right=of cam] (moge) {MoGe-2 depth filler\\global scale +\\local alignment};
-  \node[blk, right=of moge] (arm) {Arm self-filter\\FK + inflated AABBs};
-  \node[blk, right=of arm] (hum) {Human filter\\pose landmarks\\+ padded box};
-  \node[blk, right=of hum] (nvb) {nvblox TSDF\\2\,cm voxels\\local occupancy query};
-  \node[blk, right=of nvb] (col) {Octree\\collision checker\\(arm planning)};
-  \draw[arr] (cam) -- node[above,font=\scriptsize]{RGB, \(Z\)} (moge);
-  \draw[arr] (moge) -- node[above,font=\scriptsize]{\(\hat Z\)} (arm);
-  \draw[arr] (arm) -- (hum);
-  \draw[arr] (hum) -- node[above,font=\scriptsize]{\(\tilde Z\)} (nvb);
+  \node[blk] (cam) {\textbf{(1) Camera}\\Azure Kinect, RGB\\\(1280{\times}720\), depth\\reg.\ to color, \(t_c\)};
+  \node[blk, right=of cam] (brg) {\textbf{(2) LN\(\rightarrow\)ROS}\\camera bridge\\blocking read,\\stamp \(:=t_c\)};
+  \node[blk, right=of brg] (moge) {\textbf{(3) Depth filler}\\MoGe-2 + global\\scale + variational\\alignment (GPU)};
+  \node[blk, right=of moge] (flt) {\textbf{(4) Filter +}\\\textbf{point cloud}\\TF, range, arm,\\human masks};
+  \node[blk, right=of flt] (nvb) {\textbf{(5) nvblox TSDF}\\2\,cm voxels, local\\occupancy query\\(or OctoMap)};
+  \node[blk, right=of nvb] (col) {\textbf{(6) Collision}\\\textbf{map provider}\\1\,cm octree\\(arm planning)};
+  \draw[arr] (cam) -- node[above,font=\scriptsize]{LN} (brg);
+  \draw[arr] (brg) -- node[above,font=\scriptsize]{RGB, \(Z\)} (moge);
+  \draw[arr] (moge) -- node[above,font=\scriptsize]{RGB, \(\hat Z\)} (flt);
+  \draw[arr] (flt) -- node[above,font=\scriptsize]{\(\tilde Z\)} (nvb);
   \draw[arr] (nvb) -- node[above,font=\scriptsize]{points} (col);
-  \node[aux, below=7mm of arm] (sync) {Sync buffer\\\(q(t)\), \(T_{W}(t)\) @ 1\,kHz};
+  \node[aux, below=7mm of cam] (drv) {real robot:\\camera driver publishes\\the same LN topics};
   \node[aux, below=7mm of moge] (info) {camera\_info\\\(f_x \rightarrow\) FoV};
-  \node[aux, below=7mm of nvb] (tf) {TF: map \(\rightarrow\) camera\\(odometry \(\circ\) mount)};
-  \draw[darr] (sync) -- (arm);
+  \node[aux, below=7mm of flt] (sync) {Sync buffer\\\(q(t_c)\), \(T_{W}(t_c)\) @ 1\,kHz};
+  \node[aux, below=7mm of nvb] (tf) {TF @ \(t_c\): map \(\rightarrow\)\\camera (odom.\ \(\circ\) mount)};
+  \draw[darr] (drv) -- (cam);
   \draw[darr] (info) -- (moge);
+  \draw[darr] (sync) -- (flt);
+  \draw[darr] (flt.south east) -- (tf.north west);
   \draw[darr] (tf) -- (nvb);
-  \draw[darr] (sync.east) -- (tf.west);
 \end{tikzpicture}}
-\caption{Architecture of the perception-to-mapping pipeline. Solid arrows: image
-data flow at camera rate (15\,Hz). Dashed: auxiliary state. Pixels removed by
-the arm and human filters are set to zero (``no measurement''). nvblox does not
-integrate zero pixels, so masked regions neither add nor carve geometry.}
+\caption{Software architecture of the perception-to-mapping pipeline. Each
+block is a separate process. (1)~runs only with a locally attached camera; on
+the robot, the camera driver publishes the same LN topics. From (2) on, stages
+communicate over ROS\,2 topics, and every message of a frame carries the
+capture timestamp \(t_c\) as its header stamp. Solid arrows: image data flow at
+camera rate (15\,Hz). Dashed: auxiliary state. Pixels removed by the filters in
+(4) are set to zero (``no measurement''). nvblox does not integrate zero
+pixels, so masked regions neither add nor carve geometry.}
 \label{fig:architecture}
 \end{figure*}
 
-Fig.~\ref{fig:architecture} shows the pipeline. The stages are implemented as
-ROS\,2 nodes. Robot-internal state (odometry, joint angles, camera mount) is
-obtained through the robot's real-time middleware. Each stage is described
-below in data-flow order. The depth filler is the focus of
-Sec.~\ref{sec:filler}.
+Fig.~\ref{fig:architecture} shows the pipeline. Each stage runs as its own
+process. Robot-internal state (odometry, joint angles, camera mount) is
+obtained through the robot's real-time middleware, links\_and\_nodes (LN).
+Sec.~\ref{sec:architecture} explains why the pipeline is split this way.
+The remaining sections describe the stages in data-flow order. The depth
+filler is the focus of Sec.~\ref{sec:filler}.
+
+\subsection{Software Architecture and Design Decisions}
+\label{sec:architecture}
+The pipeline consists of six stages, each with a single task:
+(1)~a camera publisher that reads a locally attached Azure Kinect and
+publishes RGB, registered depth and intrinsics with the capture timestamp on
+LN; (2)~a bridge that forwards these LN topics unchanged to ROS\,2;
+(3)~the depth filler (Sec.~\ref{sec:filler}); (4)~a filter node that
+publishes the camera pose as TF, applies the range, arm and human filters
+(Secs.~\ref{sec:selffilter} and~\ref{sec:humanfilter}) and publishes the
+filtered depth image and point cloud; (5)~the volumetric map
+(Sec.~\ref{sec:nvblox}); and (6)~a collision-map provider that converts the
+map into a collision octree for the arm planner. The design follows from
+the decisions below.
+
+\textbf{ROS\,2 as the data bus.} All image data between the stages travels over
+ROS\,2. ROS provides native message types for everything that flows through
+the pipeline: images, camera intrinsics, point clouds, transforms and octrees.
+nvblox, OctoMap~\cite{hornung2013octomap} and exact time synchronisation of
+topics work directly with these types. Every intermediate result can also be
+shown in RViz without extra code, such as raw and completed depth next to
+each other, the filtered point cloud or the map. This made debugging the filler
+and the masks much easier. LN remains where the robot already uses it: the
+camera driver, the synchronisation buffer, the camera mount and the map-reset
+services.
+
+\textbf{One process per task.} An earlier version did camera access, bridging,
+filtering, TF and point-cloud generation in one timer loop. Splitting it has
+three advantages. First, the stages have conflicting dependencies. The
+filler needs a PyTorch environment for MoGe, while the other stages need the
+robot middleware and the system ROS packages. Separate processes that talk
+over ROS avoid this conflict. Second, a slow stage cannot block a fast one.
+The filler's latency does not delay the camera stream, and the
+camera does not wait for the filler. Third, stages can be swapped or
+skipped. The filter node can read the raw instead of the completed depth, and
+nvblox can be replaced by OctoMap. Neither change touches any other stage.
+
+\textbf{Identical input on the robot and in the lab.} On the robot, the camera
+driver already publishes RGB, depth and intrinsics on LN. Stage~(1) publishes
+exactly the same topics and message definitions from a locally attached
+camera. Everything from stage~(2) on is therefore identical in both setups,
+and the bridge needs only a single input path. Because the LN read blocks
+until the next packet arrives, the bridge needs no timer and forwards every
+frame as soon as it arrives.
+
+\textbf{The capture timestamp is passed through.} Stage~(1) stamps each frame
+with its capture time \(t_c\). This is the same clock that the synchronisation
+buffer uses (Sec.~\ref{sec:sync}). The bridge writes \(t_c\) into the header
+stamp, and no later stage changes it. The filler copies the header of its
+input, and the filter node stamps the TF, the filtered depth and the point
+cloud with it. This has two consequences. The filter node finds the joint
+angles and odometry of exactly this frame in the buffer, even though the
+filler adds about \(100\,\)ms of latency. Without this, the arm mask would lag
+behind a moving arm. The map also finds, through TF, the camera pose of exactly
+this frame. Because colour, depth and intrinsics of one frame carry the
+identical stamp, all consumers synchronise them exactly rather than
+approximately.
+
+\textbf{Newest frame first.} The filler is slower than the camera. It keeps
+only the newest synchronised frame and drops older ones, so that latency
+cannot grow without bound. It republishes colour and intrinsics together with
+the completed depth. Downstream nodes therefore receive a consistent triple
+with a single stamp.
+
+\textbf{Fill first, then filter.} The range, arm and human filters run after
+the filler (Sec.~\ref{sec:humanfilter}). MoGe sees the full image, which
+helps its scale estimate. Anything that was filled into a masked region is
+removed afterwards. The range limit therefore also applies to filled values.
+
+\textbf{TF from the filter node.} The filter node already queries the
+synchronisation buffer for the arm filter. It therefore also publishes
+\(T_{\text{map},W_t}(t_c)\) together with the static camera mount, before
+the filtered depth of the same frame.
+
+\textbf{Depth image for nvblox, point cloud for the rest.} The nvblox
+PyTorch interface integrates depth images by projection. The filter node
+therefore publishes the same filtered data twice: as a depth image for nvblox
+and as a point cloud for OctoMap and RViz. The collision-map provider subscribes to whichever map backend is
+active. It turns the occupied points into a COAL octree, axis-aligned boxes
+or a prepared map for the collision checker, and can remove a grasped
+object's volume from the map.
 
 \subsection{Sensing and Pre-Processing}
 \label{sec:sensor}
@@ -265,7 +353,7 @@ The Azure Kinect runs at \(15\,\)Hz with \(720\)p color and the wide
 field-of-view, \(2{\times}2\)-binned depth mode. Depth is re-projected into
 the color camera with the factory calibration, so that RGB and depth share
 the intrinsics \(K\) and are pixel-aligned. Depth values beyond
-\(8\,\)m are discarded. A value of \(0\) denotes ``no measurement'' throughout
+\(8\,\)m are discarded in the filter stage, after filling. A value of \(0\) denotes ``no measurement'' throughout
 the pipeline.
 
 \subsection{Time Synchronisation}
@@ -294,8 +382,11 @@ explain its final structure.
 camera rate on an NVIDIA RTX A6000 (\(\geq\!10\,\)Hz, i.e.\ at most
 \(100\,\)ms per frame). Diffusion-based completion (Marigold-DC) was
 excluded because it needs several seconds per frame even in its fastest
-setting. A recent diffusion-transformer point-map model was excluded because
-its backbone weights are access-restricted. The first working prototype used
+setting. PointDiT~\cite{xu2026pointdit}, a recent diffusion-transformer
+point-map model, was excluded because it builds on the
+DINOv3~\cite{simeoni2025dinov3} backbone. The DINOv3 weights are not open
+source. They are released under Meta's own DINOv3 licence, and downloading
+them requires an access request. The first working prototype used
 Prompt Depth Anything~\cite{lin2025promptda} (small variant), which consumes
 the sensor depth directly. It failed in a characteristic way. The model is
 trained on dense, low-resolution LiDAR prompts, so the ToF holes had to be
@@ -510,22 +601,19 @@ continuously on the input data. Small changes in the set of valid pixels
 between frames therefore produce small changes in \(c\).
 
 \subsection{Implementation}
-The filler runs as a separate ROS\,2 node behind the camera node rather than
-inside it, for three reasons. (i)~The camera node depends on the robot's
-middleware and system Python packages, while MoGe requires a separate
-PyTorch environment with incompatible library versions. Separate processes
-that communicate over ROS avoid this conflict. (ii)~MoGe's latency must not
-stall the camera timer, which also publishes odometry and TF at \(15\,\)Hz.
-The filler always processes the newest frame. (iii)~Mapping can switch between
-raw and filled depth without touching the camera node.
-Both variants are implemented in NumPy/OpenCV. Variant~B is additionally
-implemented in PyTorch on the GPU, with the same arithmetic: block
-statistics via average pooling, the matrix-free CG operator via shifted
-tensor slices, and cached upsampling index tables. In the GPU path, the
-prediction never leaves GPU memory before fusion. A live viewer shows RGB,
-raw and completed depth with the filled region outlined, and continuously
-evaluates the fill on held-out measurements (Sec.~\ref{sec:protocol}) to
-monitor quality online.
+The filler is stage~(3) of the pipeline (Sec.~\ref{sec:architecture}). It
+subscribes to the raw colour, depth and intrinsics, which it synchronises
+exactly by their common stamp. It publishes the completed depth as
+\(16\)-bit millimetres under the original header, so that measured pixels
+pass through bit-exactly. The deployed node runs Variant~B in PyTorch on the
+GPU: block statistics via average pooling, the matrix-free CG operator via
+shifted tensor slices, and cached upsampling index tables. The prediction
+never leaves GPU memory before fusion. The node has no visualisation, because
+its inputs and outputs can be inspected in RViz. NumPy/OpenCV
+implementations of both variants with the same arithmetic are used in the
+sweeps and the map-level evaluation (Sec.~\ref{sec:exp}). During development,
+a live viewer showed RGB, raw and completed depth and continuously evaluated
+the fill on held-out measurements (Sec.~\ref{sec:protocol}).
 
 \begin{figure*}[t]
 \centering
@@ -564,14 +652,13 @@ dominate for small bodies. The eight corners of each box are transformed into
 the camera frame with the fixed mount transform \(T_{W_tC}\) and projected with
 \(K\). The convex hull of the projected corners is rasterised into a 2-D mask.
 
-Two modes are supported. In \emph{2-D mode}, all pixels in the projected hull
-are removed. This is conservative and also deletes background seen
-``through'' the hull. In \emph{3-D mode} (default), the pixels inside the hull
-are back-projected with their depth, and only points that fall inside at least
-one of the inflated boxes (bounded in the camera frame) are removed.
-Background behind the arm is kept, which keeps the map
-observable while the arm moves through the field of view. Removed pixels are
-set to zero.
+Removing all pixels in the projected hull would be conservative, but it would
+also delete background seen ``through'' the hull. Instead, the pixels inside
+the hull are back-projected with their depth, and only points that fall
+inside at least one of the inflated boxes (bounded in the camera frame) are
+removed. Background behind the arm is kept, so the map remains observable
+while the arm moves through the field of view. Pixels inside the hull that
+carry no depth are also excluded. Removed pixels are set to zero.
 
 % =========================================================================
 \section{Human Filter}
@@ -606,8 +693,10 @@ A single completed depth image is still a noisy, partial view. Stability
 comes from fusing many such views over time. We integrate every filtered
 depth frame exactly once into a TSDF with \(2\,\)cm voxels using the PyTorch
 interface of nvblox~\cite{millane2024nvblox}. The camera pose at the
-image timestamp is looked up through TF as the composition of platform
-odometry and the static camera mount. Frames without a pose within
+capture timestamp \(t_c\) is looked up through TF as the composition of
+platform odometry and the static camera mount, both published by the filter
+stage (Sec.~\ref{sec:architecture}). OctoMap~\cite{hornung2013octomap} can
+be used instead, integrating the filtered point cloud. Frames without a pose within
 \(20\,\)ms are skipped rather than integrated with a wrong pose. The TSDF
 performs a weighted running average of truncated signed distances along each
 measured ray~\cite{curless1996volumetric}. Repeated observations reinforce
