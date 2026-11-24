@@ -127,12 +127,11 @@ checker~\cite{pan2012fcl,carpentier2019pinocchio}.
 % Block B (1): why holes matter
 The weak point of this chain is missing depth. In our recordings, \(28\,\%\)
 of the colour-registered depth pixels carry no measurement. These holes follow
-from known weaknesses of ToF sensing (Sec.~\ref{sec:tofweak}): mixed pixels
-along depth edges, multipath reflections in corners, too little signal on dark
-surfaces, saturation on glossy and retroreflective surfaces, transparency, and
-a limited operating range. They therefore cluster on black furniture,
-monitors, chair legs, glass, object edges and the background, which are the
-structures an arm collides with. A TSDF integrator only updates voxels along valid
+from the main weaknesses of ToF depth (Sec.~\ref{sec:tofweak}): flying pixels,
+multipath interference, low reflectivity, specular and transparent surfaces,
+and a limited range. They therefore cluster on object edges, black furniture,
+monitors, glass and the background, which are the structures an arm collides
+with. A TSDF integrator only updates voxels along valid
 rays~\cite{curless1996volumetric}, so these regions stay unobserved. The
 occupancy query treats unobserved voxels as free, because otherwise every
 unseen voxel would block the planner. A persistent hole on a black table edge
@@ -388,67 +387,54 @@ the pipeline.
 
 \subsection{Known Weaknesses of ToF Depth}
 \label{sec:tofweak}
-An amplitude-modulated ToF camera such as the Azure Kinect measures depth from
-the phase shift of its own reflected infrared light. The depth engine sets a
-pixel to zero when it cannot determine this phase reliably~\cite{msft2024kinectdepth}.
-Table~\ref{tab:tofweak} lists the effects that cause holes and errors on our
-platform. Three properties of these holes matter for the filler. First, they
-are structured: they lie on edges, dark or glossy objects, and in the
-background, not at random pixels. Second, many are permanent: a black monitor
-or a glass door is missing in every frame from every nearby viewpoint. Third,
-they are often one-sided, with measurements on only one side, as at an object
-boundary or the border of the illumination mask. Some effects produce wrong
-depth instead of a hole. Flying pixels that survive the sensor's filters and
-multipath bias in corners enter the alignment as if they were measurements.
+A continuous-wave ToF camera such as the Azure Kinect measures depth from the
+phase shift of its own modulated infrared light. Where the phase cannot be
+determined reliably, the depth engine invalidates the pixel and reports
+zero~\cite{msft2024kinectdepth}. Table~\ref{tab:tofweak} lists the main
+weaknesses of ToF depth. Two properties of the resulting holes matter for the
+filler. First, they are structured: they lie along depth discontinuities, on
+dark, specular or transparent objects, and in the background. Second, many
+are permanent and one-sided: a black monitor or a glass door is missing in
+every frame, and at an object boundary measurements exist on only one side.
+Flying pixels and multipath interference can also produce wrong depth instead
+of a hole, which then enters the alignment like a measurement.
 
 \begin{table}[t]
 \centering
-\caption{Weaknesses of the Azure Kinect ToF depth on our platform. ``Hole'':
-the pixel is invalidated (\(\Dm=0\)); ``error'': a wrong depth is reported.}
+\caption{Main weaknesses of ToF depth cameras.}
 \label{tab:tofweak}
 \footnotesize
 \setlength{\tabcolsep}{3pt}
 \renewcommand{\arraystretch}{1.12}
 \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}p{0.43\linewidth}>{\raggedright\arraybackslash}p{0.26\linewidth}@{}}
 \toprule
-Effect & Cause & Result \\
+Weakness & Cause & Effect on depth \\
 \midrule
-Flying pixels (edge bleeding) & one pixel integrates light from foreground and
-background at a depth edge~\cite{chugunov2021masktof} & hole band along edges, or
-false points between the surfaces \\
-Multipath interference & light reflects off one surface onto another before it
-returns, e.g.\ in corners and in front of edges~\cite{naik2015mpi,msft2024kinectdepth} &
-hole, or depth biased away from the camera \\
-Low signal & dark, absorbing surfaces; grazing angles; long range & hole \\
-Saturation & glossy, specular and retroreflective (cat's-eye) surfaces return
-too much light; the phase is lost~\cite{msft2024kinectdepth} & hole, sometimes
-with a halo \\
-Transparency & glass and clear plastic transmit or mirror the light & hole, or
-depth of what lies behind \\
-Range & the specified range depends on the depth mode
-(\(0.25\)--\(2.88\,\)m to \(0.5\)--\(5.46\,\)m~\cite{msft2024kinectspec});
-beyond it, only well-reflecting surfaces return light & sparse, noisy far
-depth; holes in the background \\
-Illumination mask & the illuminated area is circular (wide-field modes) or
-hexagonal (narrow-field modes)~\cite{msft2024kinectdepth}, the colour image is
-rectangular & permanent holes at the image border \\
-Registration shadow & depth is reprojected into the colour camera, which sees
-regions hidden from the depth camera & hole band beside foreground edges \\
-Motion & the raw phase images are captured sequentially~\cite{msft2024kinectdepth} & more holes at edges
-during fast motion \\
+Flying pixels & a pixel at a depth discontinuity integrates light from
+foreground and background~\cite{chugunov2021masktof} & invalid band along
+edges, or points between the surfaces \\
+Multipath interference & light reaches a pixel over more than one path, e.g.\
+via a second surface in corners~\cite{naik2015mpi,msft2024kinectdepth} &
+invalid pixels, or depth too large \\
+Low reflectivity & dark surfaces and grazing angles return little light (low
+signal-to-noise ratio)~\cite{msft2024kinectdepth} & invalid pixels \\
+Specular and transparent surfaces & mirror-like surfaces reflect the light away
+or saturate the sensor; glass transmits it~\cite{msft2024kinectdepth} & invalid
+pixels, or depth of the background \\
+Limited range & the returned signal decreases with distance; the specified
+range depends on the depth mode and reflectivity~\cite{msft2024kinectspec} &
+sparse, noisy far depth \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The range limit is soft. The specified operating range of the Azure Kinect
-depends on the depth mode and the reflectivity of the
-surface~\cite{msft2024kinectspec}, and our recordings contain valid depth up to
-\(6.86\,\)m. With distance, however, fewer surfaces return enough light, so
-far depth becomes sparse and its noise grows. \todo{state the depth mode used
-by the camera driver on the robot} The pipeline accepts depth up to \(8\,\)m. The data weight of
-Variant~B (Eq.~\eqref{eq:wdata}) therefore reduces the weight of distant
-measurements, and its decay term limits how far near-field corrections reach
-into the background.
+The range limit is soft. Our recordings contain valid depth up to \(6.86\,\)m,
+but with distance fewer surfaces return enough light, so far depth becomes
+sparse and noisier. \todo{state the depth mode used by the camera driver on
+the robot} The pipeline accepts depth up to \(8\,\)m. The data weight of
+Variant~B (Eq.~\eqref{eq:wdata}) reduces the weight of distant measurements,
+and its decay term limits how far near-field corrections reach into the
+background.
 
 \subsection{Time Synchronisation}
 \label{sec:sync}
