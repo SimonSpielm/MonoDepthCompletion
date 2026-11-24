@@ -428,10 +428,12 @@ sparse, noisy far depth \\
 \end{tabular}
 \end{table}
 
-The range limit is soft. Our recordings contain valid depth up to \(6.86\,\)m,
-but with distance fewer surfaces return enough light, so far depth becomes
-sparse and noisier. \todo{state the depth mode used by the camera driver on
-the robot} The pipeline accepts depth up to \(8\,\)m. The data weight of
+The range limit is soft. We use the wide-field \(2{\times}2\)-binned depth
+mode for its large field of view. Its specified operating range is
+\(0.25\)--\(2.88\,\)m~\cite{msft2024kinectspec}, but well-reflecting
+surfaces return valid depth beyond it: our recordings contain depth up to
+\(6.86\,\)m. With distance, fewer surfaces return enough light, so far depth
+becomes sparse and noisier. The pipeline accepts depth up to \(8\,\)m. The data weight of
 Variant~B (Eq.~\eqref{eq:wdata}) reduces the weight of distant measurements,
 and its decay term limits how far near-field corrections reach into the
 background.
