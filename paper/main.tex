@@ -44,6 +44,7 @@
 \definecolor{cFilter}{HTML}{2E8B57}  % filtering
 \definecolor{cMap}{HTML}{6A4BB8}     % mapping
 \definecolor{cAux}{HTML}{6B6B6B}     % auxiliary state
+\definecolor{cNew}{HTML}{1F8A8A}     % MoGe-3 addition
 
 \begin{document}
 
@@ -209,7 +210,8 @@ Anything~\cite{yang2024depthanything,yang2024depthanythingv2}, or metric
 depth, as UniDepth~\cite{piccinelli2024unidepth},
 Metric3D\,v2~\cite{hu2024metric3dv2}, Depth
 Pro~\cite{bochkovskii2025depthpro} and MoGe-2~\cite{wang2025moge2}, which
-extends the point-map model MoGe~\cite{wang2025moge} to metric scale. Even
+extends the point-map model MoGe~\cite{wang2025moge} to metric scale and is
+refined further by MoGe-3~\cite{kong2026moge3} (Sec.~\ref{sec:bg-moge}). Even
 metric predictions need alignment before they can replace sensor depth. We use
 MoGe-2 because it accepts the known field of view, outputs a validity mask, is
 MIT-licensed, and runs in \(40\,\)ms on our GPU. PointDiT~\cite{xu2026pointdit}
@@ -251,6 +253,626 @@ space before integration.
 mapping pipeline, the filler output is accumulated, and its behaviour in large
 holes and over time determines the map. We make this regime the evaluation
 target and compare local and variational alignment within it.
+
+% =========================================================================
+\section{Background}
+\label{sec:background}
+
+The pipeline builds on two external components: the monocular geometry model
+MoGe, which predicts the depth that fills the holes, and nvblox, which fuses the
+completed depth into a map. This section summarises how both work, to the
+extent that the later sections depend on it. Notation introduced here is used in
+Secs.~\ref{sec:filler} and~\ref{sec:filtermap}.
+
+\subsection{MoGe: Monocular Geometry Estimation}
+\label{sec:bg-moge}
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\scriptsize,
+  b/.style={draw=#1!75!black, fill=#1!13, rounded corners=2pt, align=center,
+            text width=1.95cm, minimum height=0.85cm, inner sep=1.5pt},
+  a/.style={-{Stealth[length=1.8mm]}, line width=0.8pt, draw=black!70},
+  da/.style={-{Stealth[length=1.8mm]}, dashed, line width=0.7pt, draw=black!55},
+  frame/.style={draw=#1!70!black, rounded corners=5pt, line width=0.9pt, inner sep=5pt},
+]
+% MoGe-2 base
+\node[b=cAux]  (img) at (0,0)      {RGB image \(I\)\\(+ known \(\mathrm{FoV}_x\))};
+\node[b=cFill] (enc) at (2.45,0)   {DINOv2 ViT\\encoder};
+\node[b=cFill] (dec) at (4.9,0)    {convolutional\\decoder};
+\node[b=cFill] (hd)  at (7.35,0)   {heads: point map\\\(P\), mask, normals};
+\node[b=cFill] (mlp) at (2.45,-1.3){MLP on\\CLS token \(\rightarrow s\)};
+\node[b=cFill] (met) at (7.35,-1.3){metric point map\\\(sP\), depth \(Z\)};
+\draw[a] (img) -- (enc);
+\draw[a] (enc) -- node[above]{tokens} (dec);
+\draw[a] (dec) -- (hd);
+\draw[a] (enc) -- (mlp);
+\draw[a] (mlp) -- node[above]{\(s\)} (met);
+\draw[a] (hd) -- node[right]{\(P\)} (met);
+% MoGe-3 refiner
+\node[b=cNew]  (vox) at (7.35,-3.2) {voxelise\\\(q=(u,v,\zeta)\)};
+\node[b=cNew]  (unet) at (4.9,-3.2){sparse 3D U-Net\\(+ DINOv2 features)};
+\node[b=cNew]  (upd) at (2.45,-3.2) {\(\zeta\leftarrow\zeta+\Delta\zeta\)\\rays \((u,v)\) fixed};
+\draw[a] (vox) -- (unet);
+\draw[a] (unet) -- node[above]{\(\Delta\zeta\)} (upd);
+\draw[a] (upd.south) -- ++(0,-0.4) -| node[pos=0.25, below] (lp) {repeat \(K\) times (default \(K=3\))} (vox.south);
+\draw[a] (met.south) -- node[right]{\(P\)} (vox.north);
+\draw[da] (enc.south east) -- node[pos=0.55, right, font=\scriptsize]{features} (unet.north);
+\begin{scope}[on background layer]
+  \node[frame=cFill, fill=cFill!4, fit=(img)(enc)(dec)(hd)(mlp)(met), label={[text=cFill!80!black, font=\scriptsize\bfseries]above:MoGe-2 (deployed in this work)}] {};
+  \node[frame=cNew, fill=cNew!4, dashed, fit=(vox)(unet)(upd)(lp), inner ysep=5pt, label={[text=cNew!80!black, font=\scriptsize\bfseries, yshift=1pt]below:MoGe-3 addition: sparse volumetric refinement}] {};
+\end{scope}
+\end{tikzpicture}}
+\caption{Structure of MoGe-2 and MoGe-3, redrawn after~\cite{wang2025moge2,kong2026moge3}.
+MoGe-2 (orange) predicts an affine-invariant point map \(P\) and, from the class
+token, a global metric scale \(s\). MoGe-3 starts from a MoGe-2-type model and
+adds only the refinement stage (teal): the point map is lifted onto a sparse
+voxel shell, a sparse 3D U-Net predicts a log-depth residual, and the update is
+repeated \(K\) times along fixed pixel rays.}
+\label{fig:moge}
+\end{figure}
+
+\textbf{Affine-invariant point maps (MoGe).} MoGe~\cite{wang2025moge} maps an
+image \(I\) to a point map \(P\in\R^{H\times W\times3}\), one 3-D point per
+pixel in the camera frame. The prediction is defined only up to a global scale
+\(s\) and a shift \(t\), \(P \cong sP+t\). With the principal point assumed at
+the image centre, the shift reduces to the optical axis,
+\(t=(0,0,t_z)\). This affine invariance removes the focal-length ambiguity of
+scale-only invariant point maps. At inference, the focal length \(f\) and the
+shift are recovered by minimising the reprojection error of the predicted
+points,
+\begin{equation}
+  \min_{f,\,t_z'}\; \sum_i \Big(\frac{f\,x_i}{z_i+t_z'}-u_i\Big)^2
+  +\Big(\frac{f\,y_i}{z_i+t_z'}-v_i\Big)^2 ,
+  \label{eq:mogefocal}
+\end{equation}
+over valid pixels \(i\) with image coordinates \((u_i,v_i)\) relative to the
+principal point. If the field of view is known, the public implementation
+fixes \(f\) and solves only for the shift, which is how we use it. The network
+consists of a DINOv2~\cite{oquab2024dinov2} Vision Transformer encoder and a
+convolutional decoder, with heads for the point map and for a validity mask
+that marks undefined regions such as the sky. The number of image tokens of
+the encoder is a free parameter that trades detail against latency.
+
+\textbf{Training with optimal alignment.} Because \(P\) is affine-invariant, a
+prediction \(\hat P\) is compared with the ground truth \(P^\ast\) only after
+the best alignment. MoGe computes it with a robust solver,
+\begin{equation}
+  (s^\ast,t^\ast)=\arg\min_{s,t}\sum_i \frac{1}{z_i}\,
+  \min\!\big(\|s\hat p_i+t-p^\ast_i\|_1,\,\kappa\big),
+  \label{eq:roe}
+\end{equation}
+a truncated (threshold \(\kappa\)), inverse-depth-weighted \(L_1\) objective. The global loss applies
+this alignment to the whole image. A multi-scale local loss applies it
+independently inside spheres around sampled points, so that local geometry is
+supervised even when the global alignment is imperfect. This principle,
+aligning a prediction to measurements with a robust estimator, is the basis of
+Stage~1 of our filler (Sec.~\ref{sec:global}), which aligns scale only.
+
+\textbf{Metric scale (MoGe-2).} MoGe-2~\cite{wang2025moge2} keeps the
+affine-invariant point map and adds metric scale as a separate prediction.
+A two-layer MLP on the class token of the encoder predicts one global scale
+\(\hat s\), trained with \(\|\log\hat s-\log s^\ast\|^2\) against the optimal
+scale of Eq.~\eqref{eq:roe}. The metric point map is \(\hat s P\). The authors
+report that this decoupling is more accurate than predicting metric points
+directly, because the affine-invariant space stays well normalised, and that a
+convolutional scale head is worse because metric scale requires global
+information. MoGe-2 also refines its real training data: a model trained on
+synthetic data identifies inconsistent regions of the real depth maps, and
+these are completed by a Poisson problem in log depth with the remaining real
+depth as boundary condition. Variant~B of our filler solves a closely related
+problem at inference time, with the sensor depth as boundary condition
+(Sec.~\ref{sec:fusion}).
+
+\textbf{What MoGe-3 adds.} MoGe-3~\cite{kong2026moge3} is initialised from
+MoGe-2 and keeps its base model unchanged: encoder, point map, validity mask,
+normals and metric scale. The boundary between the two is therefore sharp
+(Fig.~\ref{fig:moge}). Everything up to the metric point map is MoGe-2, and
+MoGe-3 adds a refinement stage that only changes depth along fixed pixel rays.
+Each point is written as \(q=(u,v,\zeta)\) with \(u=X/Z\), \(v=Y/Z\) and
+\(\zeta=\log Z\). The points are lifted onto a sparse voxel shell: pixel
+\((i,j)\) occupies voxel \((i,j,\mathrm{round}(N_\zeta\,\zeta_{ij}))\), with
+\(N_\zeta=200\) bins along log depth, so that two voxels are neighbours only if
+their pixels are adjacent and their log depths are close. A sparse 3-D U-Net,
+which receives the DINOv2 features at its bottleneck, predicts a residual
+\(\Delta\zeta\) for every voxel, and \(\zeta\leftarrow\zeta+\Delta\zeta\). The
+step is repeated \(K\) times (default \(K=3\)). With \(K=0\), MoGe-3 has the
+latency of MoGe-2. With \(K=3\), the authors report \(121\,\)ms instead of
+\(39\,\)ms for ViT-L at \(700^2\) pixels on an A100. The gains are mainly local:
+over nine benchmarks, the fraction of points within \(1\,\%\) of the local
+ground truth rises from \(46.6\) to \(55.9\,\%\), while global and metric
+accuracy change little (metric-depth relative error \(15.6\) vs.\
+\(15.0\,\%\)). The authors name flying points at object boundaries as a
+remaining limitation of the regression formulation.
+
+\textbf{Consequences for depth completion.} Two properties carry over to both
+versions. First, the metric scale is a single global factor predicted from
+image content, with a metric-depth error of about \(15\,\%\) on public
+benchmarks. A prediction must therefore be aligned to the sensor before it can
+fill holes, and MoGe-3 does not remove this need. Second, the shape inside a
+surface is predicted more accurately than its absolute position, which is
+the assumption behind Stage~2 of our filler: keep the predicted shape and take
+the scale from the measurements. This work deploys MoGe-2, because it fits the
+latency budget (\(40\,\)ms on our GPU, Table~\ref{tab:runtime}). MoGe-3
+replaces it without changes to the filler, at about three times the network
+latency. \todo{measure MoGe-3 latency and holdout accuracy on the robot cache}
+
+\subsection{nvblox: GPU-Accelerated TSDF Mapping}
+\label{sec:bg-nvblox}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[font=\scriptsize]
+\fill[cSense!7] (0.00,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.00,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,0.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (3.75,0.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,0.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,0.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,0.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,0.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,0.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,0.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.50,0.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,0.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,0.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,0.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,0.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,0.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,0.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,0.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,0.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.50,0.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,0.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,0.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,0.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,0.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,0.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.25,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,0.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,0.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,0.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.50,0.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,0.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,0.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,0.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,0.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,0.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.25,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,1.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,1.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,1.00) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.50,1.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,1.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,1.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,1.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,1.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,1.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,1.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,1.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,1.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,1.25) rectangle ++(0.25,0.25);
+\fill[black!22] (0.00,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,1.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (3.75,1.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,1.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,1.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,1.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (0.50,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (0.75,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (1.00,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (1.25,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (1.50,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (1.75,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (2.00,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.00,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,1.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (3.75,1.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,1.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,1.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,1.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,2.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,2.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,2.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,2.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (1.25,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (1.50,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (1.75,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (2.00,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (2.25,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (2.50,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (2.75,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (3.00,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (3.25,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (3.50,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (3.75,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.00,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,2.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,2.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (1.75,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (2.00,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (2.25,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (2.50,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (2.75,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (3.00,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (3.25,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (3.50,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (3.75,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.00,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,2.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,2.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (2.50,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (2.75,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (3.00,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (3.25,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (3.50,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (3.75,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.00,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,2.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,2.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.00,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (3.25,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (3.50,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (3.75,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.00,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,2.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,2.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.00,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (3.75,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.00,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,3.00) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,3.00) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,3.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (3.75,3.25) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.25,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,3.25) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,3.25) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.25,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,3.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (3.75,3.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,3.50) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,3.50) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,3.50) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.00,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.25,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.50,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (0.75,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.00,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.25,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.50,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (1.75,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.00,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.25,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.50,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (2.75,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.00,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!7] (3.25,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.50,3.75) rectangle ++(0.25,0.25);
+\fill[cSense!38] (3.75,3.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.00,3.75) rectangle ++(0.25,0.25);
+\fill[cFill!45] (4.25,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.50,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (4.75,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.00,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.25,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.50,3.75) rectangle ++(0.25,0.25);
+\fill[black!22] (5.75,3.75) rectangle ++(0.25,0.25);
+  % grid and voxel blocks
+  \draw[black!18, line width=0.15pt] (0,0) grid[step=0.25] (6,4);
+  \draw[black!60, line width=0.8pt] (0,0) grid[step=2] (6,4);
+  % surface
+  \draw[black, line width=1.4pt, domain=0:4, samples=40, smooth, variable=\y]
+        plot ({0.5*(7.6+0.55*sin(deg(0.9*2*\y)))},{\y});
+  % camera and rays
+  \fill[black!75] (-0.9,1.55) -- (-0.35,1.8) -- (-0.35,1.3) -- cycle;
+  \node[left, align=right] at (-0.9,1.55) {camera};
+  \foreach \yy in {0.25,1.0,3.6,3.9} \draw[black!55, line width=0.5pt] (-0.35,1.55) -- ({0.5*(7.6+0.55*sin(deg(0.9*2*\yy)))},\yy);
+  \draw[black!45, dashed, line width=0.5pt] (-0.35,1.55) -- (3.657,2.050);
+  \draw[black!45, dashed, line width=0.5pt] (-0.35,1.55) -- (3.604,3.050);
+  \node[align=center, font=\scriptsize, fill=white, inner sep=1pt, rounded corners=1pt] at (2.9,2.45) {no depth (hole)};
+  % truncation band annotation
+  \draw[<->, black!70] ({0.5*(7.6+0.55*sin(deg(0.9*0.24)))-0.65},0.12) -- ({0.5*(7.6+0.55*sin(deg(0.9*0.24)))+0.65},0.12);
+  \node[below, font=\scriptsize] at ({0.5*(7.6+0.55*sin(deg(0.9*0.24)))},0.12) {\(\pm\varepsilon_T\)};
+  % legend
+  \begin{scope}[shift={(0,-0.75)}]
+    \fill[cSense!38] (0,0) rectangle ++(0.3,0.2); \node[right] at (0.3,0.1) {\(0<\Phi<\varepsilon_T\)};
+    \fill[cFill!45] (1.9,0) rectangle ++(0.3,0.2); \node[right] at (2.2,0.1) {\(-\varepsilon_T<\Phi<0\)};
+    \fill[cSense!7] (0,-0.35) rectangle ++(0.3,0.2); \draw[black!25] (0,-0.35) rectangle ++(0.3,0.2); \node[right] at (0.3,-0.25) {free (\(\Phi=\varepsilon_T\))};
+    \fill[black!22] (1.9,-0.35) rectangle ++(0.3,0.2); \node[right] at (2.2,-0.25) {unobserved (\(\omega=0\))};
+    \draw[black!60, line width=0.8pt] (4.15,0) rectangle ++(0.3,0.2); \node[right] at (4.45,0.1) {voxel block};
+  \end{scope}
+\end{tikzpicture}
+\caption{Projective TSDF integration in nvblox, 2-D illustration. Voxels on
+rays with a valid depth are updated up to \(\varepsilon_T\) behind the measured
+surface; voxels in front of the band become free. Rays without depth update
+nothing, so the voxels on them stay unobserved (\(\omega=0\)), which the
+occupancy query treats as free. Thick lines mark voxel blocks, the unit of
+allocation (\(8^3\) voxels in 3-D, drawn as \(8^2\)).}
+\label{fig:tsdf}
+\end{figure}
+
+\textbf{Truncated signed distance fields.} A TSDF stores, for every voxel
+\(x\), a truncated signed distance \(\Phi(x)\in[-\varepsilon_T,\varepsilon_T]\)
+to the nearest surface, positive in front of it, together with a weight
+\(\omega(x)\ge0\). The surface is the zero level set of \(\Phi\). Given a depth
+image and the camera pose, projective integration approximates the distance
+along the camera ray: the voxel centre is projected into the image, and
+\(d_p = d - d_v\), where \(d\) is the measured depth at that pixel and \(d_v\)
+the depth of the voxel centre. The truncated value \(\phi=\mathrm{clip}(d_p,
+-\varepsilon_T,\varepsilon_T)\) is fused with a weighted running
+average~\cite{curless1996volumetric},
+\begin{equation}
+  \Phi \leftarrow \frac{\omega\,\Phi+\nu\,\phi}{\omega+\nu},\qquad
+  \omega \leftarrow \min(\omega+\nu,\;\omega_{\max}),
+  \label{eq:tsdf}
+\end{equation}
+where \(\nu\) is the weight of the new observation, constant or derived from a
+sensor noise model. Voxels further than \(\varepsilon_T\) behind the measured
+surface are not updated. A voxel that no valid ray has reached keeps
+\(\omega=0\) and is unobserved (Fig.~\ref{fig:tsdf}).
+
+\textbf{Accumulation over time.} Eq.~\eqref{eq:tsdf} is the reason why a TSDF
+gives a more stable model than single frames. If the per-frame errors of
+\(\phi\) at a voxel are independent with variance \(\sigma^2\), the average
+over \(n\) observations has variance \(\sigma^2/n\). Errors that repeat in
+every frame, for example a wrong fill that the filler reproduces at the same
+place, are not reduced by averaging, because they enter every term of the
+sum. They are only removed by later observations that disagree with them. This
+distinction motivates the stability analysis in Sec.~\ref{sec:analysis}.
+
+\textbf{Data structure and GPU integration.} nvblox~\cite{millane2024nvblox}
+implements this on the GPU with a sparse two-level structure in the style of
+voxel hashing~\cite{niessner2013voxelhashing}. A hash table maps block indices
+to voxel blocks of \(8\times8\times8\) voxels, and blocks are allocated only
+where the sensor has observed space. For each depth frame, nvblox ray-traces
+the block grid to find the blocks in the view frustum, allocates missing
+blocks, and updates all voxels in these blocks in parallel by projecting their
+centres into the depth image (nearest-neighbour lookup for cameras). The map
+consists of layers on the same block structure: TSDF, colour, occupancy, a
+Euclidean signed distance field, and a mesh. The authors report speed-ups of
+up to \(177\times\) for TSDF integration over the CPU library
+Voxblox~\cite{oleynikova2017voxblox}. For dynamic scenes, nvblox can integrate
+segmented people into a separate occupancy layer that decays over time. We
+remove people in image space instead (Sec.~\ref{sec:humanfilter}), so that
+they never enter the map.
+
+\textbf{How we use nvblox.} We use the TSDF layer through the PyTorch interface
+of nvblox: one call integrates a depth image with its camera pose, and another
+queries \(\Phi\) and \(\omega\) at arbitrary 3-D points on the GPU. The ESDF and
+mesh layers are not used. The occupancy query of Sec.~\ref{sec:nvblox} reads
+\(\Phi\) and \(\omega\) directly, and treats \(\omega=0\) as free.
 
 % =========================================================================
 \section{System Overview}
@@ -726,8 +1348,8 @@ Single completed frames are partial and noisy. Stability comes from fusing
 them over time. Every filtered frame is integrated once into an nvblox TSDF
 with \(2\,\)cm voxels~\cite{millane2024nvblox}, at the camera pose read from TF
 at \(t_c\). Frames without a pose within \(20\,\)ms are skipped. The TSDF
-averages truncated signed distances along each measured
-ray~\cite{curless1996volumetric}, so repeated observations reinforce surfaces
+averages truncated signed distances along each measured ray
+(Eq.~\eqref{eq:tsdf}), so repeated observations reinforce surfaces
 and a single-frame error is averaged out or carved away by later rays. An
 error that repeats in every frame, however, is reinforced like a surface.
 
