@@ -348,9 +348,9 @@ log depth with the remaining measurements as boundary condition. Variant~B of
 our filler solves a closely related problem at inference, with the sensor depth
 as boundary condition (Sec.~\ref{sec:fusion}).
 
-\textbf{MoGe-3 and the boundary to MoGe-2.} MoGe-3~\cite{kong2026moge3} is
-initialised from MoGe-2 and keeps its base unchanged up to the metric point map:
-encoder, point map, mask, normals and scale. It adds only a refinement stage
+\textbf{MoGe-3.} MoGe-3~\cite{kong2026moge3} is initialised from MoGe-2 and
+keeps its base unchanged up to the metric point map: encoder, point map, mask,
+normals and scale. Compared with MoGe-2, it adds a refinement stage
 (Fig.~\ref{fig:moge}). Each point is written as \((u,v,\zeta)\) with
 \(u=X/Z\), \(v=Y/Z\) and \(\zeta=\log Z\). Pixel \((i,j)\) occupies the voxel
 \((i,j,\mathrm{round}(N_\zeta\zeta_{ij}))\) of a sparse shell with \(N_\zeta=200\)
