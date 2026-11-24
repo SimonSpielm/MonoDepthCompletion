@@ -28,8 +28,8 @@ MAP_BACKEND_TOPICS = {
     "nvblox": "/nvblox/occupied_points_rgb",
     "octomap": "/octomap_point_cloud_centers",
 }
-RAW_POINTCLOUD_TOPIC = "/camera/depth/points"
-FILTERED_PC_TOPIC = "/coal_octree_getter/filtered_points"
+RAW_POINTCLOUD_TOPIC = "/camera/filtered/points"
+FILTERED_PC_TOPIC = "/collision_map_provider/filtered_points"
 OCTOMAP_RESET_SERVICE = "/octomap_server/reset"
 NVBLOX_RESET_SERVICE = "nvblox.reset_map"
 MAP_FRAME = "map"
@@ -38,8 +38,10 @@ OCTREE_RESOLUTION = 0.01
 OBJECT_FILTER_MARGIN = 0.05
 
 
-class CoalOctreeGetter:
-    """Hold the latest map in Ws; optionally remove an object's occupied volume.
+class CollisionMapProvider:
+    """Step 6: Provide the latest map (nvblox or octomap) in Python as COAL octree.
+
+    Holds the latest map in Ws; optionally removes an object's occupied volume.
 
     get_octree(obj=None)                -> (coal.OcTree in Ws, timestamp)
     get_occupied_boxes_in_Wt(obj=None) -> (AABBs (N, 2, 3) in Wt, changed)
@@ -61,7 +63,7 @@ class CoalOctreeGetter:
         if self._owns_rclpy:
             rclpy.init(args=None)
 
-        self._node = Node("coal_octree_getter")
+        self._node = Node("collision_map_provider")
         self._lock = threading.Lock()
         self._mesh_lock = threading.Lock()
         self.active = True
@@ -84,7 +86,7 @@ class CoalOctreeGetter:
         # Object type -> (local mesh AABB min, local mesh AABB max)
         self._mesh_bounds_cache = {}
 
-        self.ln_clnt = ln.client("CoalOctomapBridge", [])
+        self.ln_clnt = ln.client("CollisionMapProvider", [])
         self.odb = ln_odb.ln_interface(clnt=self.ln_clnt)
         self.robot_interface = Robot_Interface()
 

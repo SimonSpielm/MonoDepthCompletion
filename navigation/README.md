@@ -1,29 +1,10 @@
 
 # How to Run
 
-## 1. Start `odometry_buffer`
+## 1.–2. Start the mapping pipeline
 
-- Creates synchronized odometry-timestamp pairs that can be subscribed to via LN topic.
-- Command:
-
-```bash
-python3 map/odometry_buffer.py
-```
-
----
-
-## 2. Start `camera_ros_publisher`
-
-- Bridges LN to ROS topics.
-- Publishes RGB, depth, and odometry data.
-- Masks humans and uses a plane fitter to fill depth image gaps (floor).
-- Command:
-
-```bash
-python3 -m navigation.map.map_publisher
-```
-
-- Add `--use_ln` flag to use the LN camera topic, otherwise reads directly from the camera.
+- Camera → MoGe depth completion → filtered pointcloud → nvblox / octomap → collision map.
+- Steps, start commands and design decisions: [mapping/README.md](mapping/README.md).
 
 ---
 

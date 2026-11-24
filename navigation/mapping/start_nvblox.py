@@ -1,4 +1,11 @@
+"""
+Step 5: nvblox TSDF mapping.
 
+Integrates the filtered depth of pointcloud_publisher.py (same data as
+/camera/filtered/points, but as image: nvblox_torch integrates depth images
+projectively). The camera pose is looked up in TF at the frame's original stamp.
+Publishes the occupied voxels around the camera as /nvblox/occupied_points_rgb.
+"""
 import links_and_nodes as ln
 import numpy as np
 import torch
@@ -89,9 +96,9 @@ class TsdfOccupiedColoredPointCloud(Node):
         super().__init__("nvblox_tsdf_occupied_colored_pc")
 
         # -------- parameters --------
-        self.declare_parameter("depth_topic", "camera/depth/image_raw")
-        self.declare_parameter("camera_info_topic", "camera/depth/camera_info")
-        self.declare_parameter("rgb_topic", "camera/color/image_raw")   # muss auf Depth registriert sein!
+        self.declare_parameter("depth_topic", "camera/filtered/depth/image_raw")   # pointcloud_publisher.py
+        self.declare_parameter("camera_info_topic", "camera/completed/camera_info")
+        self.declare_parameter("rgb_topic", "camera/completed/color/image_raw")   # muss auf Depth registriert sein!
 
         self.declare_parameter("camera_frame", "camera")
         self.declare_parameter("global_frame", "map")

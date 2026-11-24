@@ -118,9 +118,9 @@ class Arm_Collision_Model:
 
     def _initialize_octomap(self) -> None:
         """Attach the first received environment octree to the geometry model."""
-        from navigation.mapping.coal_octree_getter import CoalOctreeGetter
+        from navigation.mapping.collision_map_provider import CollisionMapProvider
 
-        self.octree_getter = CoalOctreeGetter(
+        self.octree_getter = CollisionMapProvider(
             use_pointcloud_fast=False,
             prepare_frocc=self.use_frocc,
         )

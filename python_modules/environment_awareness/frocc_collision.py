@@ -29,7 +29,7 @@ class FroccCollisionBackend:
             )
         if not getattr(model.octree_getter, "prepare_frocc", False):
             raise RuntimeError(
-                "FroccCollisionBackend requires CoalOctreeGetter(prepare_frocc=True)."
+                "FroccCollisionBackend requires CollisionMapProvider(prepare_frocc=True)."
             )
 
         cfg = model.cfg
