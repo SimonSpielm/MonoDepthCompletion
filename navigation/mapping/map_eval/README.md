@@ -10,6 +10,8 @@ record_scene.sh  ->  bag_fill.py  ->  map_build.py  ->  map_eval.py
 ```
 
 Alles läuft **offline auf denselben Bags**. Jede Variante sieht also exakt dieselben Bilder und Posen.
+Die Füll-Methoden liegen eingefroren in `fill_methods.py` (Stand main). Die Skripte laufen deshalb auf
+**main und refactor**, obwohl refactor `moge_depth.py` (Variante A) entfernt hat.
 
 ---
 
@@ -29,21 +31,41 @@ Alles läuft **offline auf denselben Bags**. Jede Variante sieht also exakt dies
 **Wichtig:** RGB, Tiefe und TF müssen **denselben `header.stamp`** tragen. `azure_interface.py` macht
 das bereits (`odom_ros_time`). `bag_fill.py` paart RGB und Tiefe nur über **exakt gleiche** Stempel.
 
-### 1.2 Optional
+### 1.2 Optional: Maske der absichtlich entfernten Pixel
 
-| Topic | Wofür |
-|---|---|
-| `/camera/depth/ignore_mask` (mono8, 255 = absichtlich entfernt) | Wenn bei der Aufnahme Mensch- oder Arm-Filter an sind. Ohne Maske würde MoGe diese Bereiche wieder füllen. |
+Die Rohtiefe im Bag muss **ungefiltert** sein. Gefüllt wird vorher, maskiert danach, wie im Betrieb.
+Damit `bag_fill.py` die Masken (Mensch, Arm, Range) kennt, braucht es eines der beiden Topics:
 
-Gibt es die Maske (noch) nicht: **Filter aus** (`--mask_humans`/`--filter_robot` weglassen), Arm
-außerhalb des Bildes, keine Personen im Bild.
+| Topic | Branch | Wofür |
+|---|---|---|
+| `/camera/filtered/depth/image_raw` (16UC1) | **refactor** (`pointcloud_publisher`) | Maske = in der Rohtiefe gemessen, gefiltert 0. Wird automatisch erkannt. |
+| `/camera/depth/ignore_mask` (mono8) | main (falls nachgerüstet) | Maske direkt |
 
-### 1.3 Kamera-Knoten-Einstellungen bei der Aufnahme
+Gibt es keins von beiden: Filter aus, Arm außerhalb des Bildes, keine Personen im Bild.
+Auch mit der abgeleiteten Maske gilt: Mensch- oder Arm-Pixel, die schon roh ein Loch waren, sind
+darin nicht enthalten. Am saubersten ist deshalb immer eine Aufnahme **ohne Personen und Arm im Bild**.
 
-- `azure_interface.py` **ohne** `--mask_humans` und `--filter_robot` (siehe oben)
+### 1.3 Was bei der Aufnahme laufen muss
+
+**Branch refactor** (neue Pipeline, `navigation/mapping/README.md`):
+
+```bash
+python3 -m navigation.mapping.synchronization_buffer
+python3 -m navigation.mapping.ln_ros_camera_bridge
+python3 -m navigation.mapping.pointcloud_publisher --raw            # liefert /tf zum Frame-Stempel
+# optional mit --mask_humans --filter_robot -> /camera/filtered/... enthält dann die Masken
+```
+
+`moge_depth_completion.py` und nvblox müssen für die Aufnahme **nicht** laufen. Gefüllt und
+kartiert wird offline. Aufgezeichnet wird die Rohtiefe `/camera/depth/image_raw` aus der Bridge.
+
+**Branch main:**
+
+- `azure_interface.py` **ohne** `--mask_humans` und `--filter_robot`
 - Pfad notieren: `--use_ln` oder k4a direkt. Beim k4a-Pfad ist die Tiefe sicher registriert.
-- `MAX_DIST = 8000` (Standard) beibehalten, `NOINFO_BEHAVIOUR = 0`
-- `odometry_buffer`/`synchronization_buffer` läuft, sonst fehlt `map → Wt`
+- `synchronization_buffer` läuft, sonst fehlt `map → Wt`
+
+Für beide gilt: `MAX_DIST = 8000` (Standard) beibehalten, `NOINFO_BEHAVIOUR = 0`.
 
 ### 1.4 Speicherbedarf
 
@@ -135,6 +157,7 @@ und `moge_sweep_optim.py`. Im Repo liegt es unter `moge_sweep_ergebnisse/`.
 ```bash
 # Schritt 1, im conda-Env "moge" (ROS gesourct): MoGe + 4 Varianten
 python bag_fill.py --scene $SCENE_ROOT/s01_monitor_tisch          # --save-pred für spätere Neu-Füllungen
+#   --b-impl deployed: B direkt aus moge_depth_completion.py (refactor, GPU) statt aus fill_methods.py
 
 # Schritt 2, im Env mit nvblox_torch (wie start_nvblox.py): Karten je Variante + Referenz
 python map_build.py --scene $SCENE_ROOT/s01_monitor_tisch

@@ -67,3 +67,9 @@ v0.2 enthält die Entwicklungsgeschichte aus dem claude.ai-Chat "RGB-to-Depth-Mo
   Bild, keine Personen.
 - **F15** Läuft `nvblox_torch` im selben Env wie MoGe? Die Skripte sind getrennt (`bag_fill.py` im
   moge-Env, `map_build.py` im nvblox-Env), funktionieren aber auch im selben.
+- **E24** Branch `refactor` entfernt `moge_depth.py` (Variante A) und die CPU-Fusion. Die Auswertung
+  nutzt deshalb eine eingefrorene Kopie aller Füll-Methoden (`map_eval/fill_methods.py`, Stand main
+  5146946) und läuft auf main und refactor. `--b-impl deployed` nimmt B direkt aus
+  `moge_depth_completion.py`. Auf refactor wird die Maske aus `/camera/filtered/depth/image_raw`
+  abgeleitet (kein eigenes `ignore_mask`-Topic nötig). Die im Paper beschriebene Reihenfolge
+  (MoGe vor Arm/Human-Filter) entspricht der refactor-Pipeline.

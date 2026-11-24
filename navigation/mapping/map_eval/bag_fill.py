@@ -5,10 +5,17 @@ Schritt 1/3 der Karten-Auswertung: ROS-2-Bag -> gefüllte Tiefe je Variante.
 Liest RGB, Tiefe, camera_info, TF (und optional ignore_mask) aus dem Bag, rechnet MoGe-2 genau
 einmal pro Frame und erzeugt daraus kausal (Frame für Frame, wie im Betrieb) die Varianten
   raw    : Sensortiefe unverändert
-  global : nur Stufe 1 (globaler Faktor, EMA 0.3)            -> moge_depth.align_and_fill(radius 0)
-  A      : lokale affine Angleichung, getunt (r=16, eps=1e-3) -> moge_depth.align_and_fill
-  B      : Gradienten-Fusion, getunt, Warmstart (GPU wenn da)  -> moge_depth_optim.fill(_torch)
-Gefüllt wird VOR dem Maskieren; Pixel aus ignore_mask werden danach wieder 0 (wie im Paper).
+  global : nur Stufe 1 (globaler Faktor, EMA 0.3)            -> fill_methods.align_and_fill(r=0)
+  A      : lokale affine Angleichung, getunt (r=16, eps=1e-3) -> fill_methods.align_and_fill
+  B      : Gradienten-Fusion, getunt, Warmstart (GPU wenn da)  -> fill_methods.fill(_torch)
+           oder mit --b-impl deployed direkt aus navigation/mapping/moge_depth_completion.py
+fill_methods.py ist eine eingefrorene Kopie von main, läuft also auf main UND refactor.
+
+Gefüllt wird VOR dem Maskieren; maskierte Pixel (Mensch/Arm/Range) werden danach wieder 0.
+Die Maske kommt aus
+  --mask      /camera/depth/ignore_mask (mono8), falls vorhanden, sonst
+  --filtered  /camera/filtered/depth/image_raw (refactor: pointcloud_publisher):
+              Maske = in der Rohtiefe gemessen, in der gefilterten Tiefe 0.
 
 Ausgabe in --out (Standard: <szene>/fill):
   meta.npz           stamps_ns, poses (T,4,4 map<-camera, NaN wenn TF fehlt), K, H, W, variants
@@ -161,6 +168,10 @@ def main():
     ap.add_argument("--depth", default="/camera/depth/image_raw")
     ap.add_argument("--info", default="/camera/color/camera_info")
     ap.add_argument("--mask", default="/camera/depth/ignore_mask")
+    ap.add_argument("--filtered", default="/camera/filtered/depth/image_raw",
+                    help="gefilterte Tiefe (refactor), daraus wird die Maske abgeleitet")
+    ap.add_argument("--b-impl", choices=("frozen", "deployed"), default="frozen",
+                    help="B aus fill_methods.py oder aus moge_depth_completion.py (refactor, GPU)")
     ap.add_argument("--map-frame", default="map")
     ap.add_argument("--cam-frame", default="camera")
     ap.add_argument("--save-pred", action="store_true")
@@ -182,8 +193,9 @@ def main():
     say(f"Pass 1: TF + Stempel aus {bag}")
     tf = OfflineTF()
     K = H = W = None
-    color_st, depth_st, has_mask = set(), set(), False
-    for topic, msg in iter_bag(bag, ["/tf", "/tf_static", a.info, a.color, a.depth, a.mask]):
+    color_st, depth_st, has_mask, has_filt = set(), set(), False, False
+    for topic, msg in iter_bag(bag, ["/tf", "/tf_static", a.info, a.color, a.depth, a.mask,
+                                     a.filtered]):
         if topic in ("/tf", "/tf_static"):
             for tr in msg.transforms:
                 tf.add(tr.header.frame_id, tr.child_frame_id, stamp_ns(tr.header),
@@ -196,7 +208,10 @@ def main():
             depth_st.add(stamp_ns(msg.header))
         elif topic == a.mask:
             has_mask = True
+        elif topic == a.filtered:
+            has_filt = True
     tf.finalize()
+    mask_src = "mask" if has_mask else ("filtered" if has_filt else None)
     if K is None:
         raise SystemExit(f"kein {a.info} im Bag")
     stamps = sorted(color_st & depth_st)[:: max(a.stride, 1)]
@@ -209,26 +224,40 @@ def main():
             poses[i] = T
     n_nopose = int(np.isnan(poses[:, 0, 0]).sum())
     say(f"  Frames (RGB+Tiefe gleicher Stempel): {len(stamps)} | ohne Pose: {n_nopose} | "
-        f"ignore_mask: {'ja' if has_mask else 'NEIN'} | {W}x{H}")
-    if not has_mask:
-        say("  WARNUNG: keine ignore_mask -> maskierte Pixel (Mensch/Arm) wären von MoGe wieder "
-            "gefüllt. Nur ok, wenn bei der Aufnahme kein Mensch/Arm im Bild war.")
+        f"Maske: {mask_src or 'KEINE'} | {W}x{H}")
+    if mask_src is None:
+        say("  WARNUNG: weder ignore_mask noch gefilterte Tiefe -> maskierte Pixel (Mensch/Arm) "
+            "wären von MoGe wieder gefüllt. Nur ok, wenn kein Mensch/Arm im Bild war.")
+    elif mask_src == "filtered":
+        say("  Maske aus gefilterter Tiefe: Pixel, die schon roh 0 waren, sind darin nicht "
+            "enthalten. Mensch/Arm-Bereiche mit Sensorlöchern können deshalb teilweise gefüllt "
+            "werden. Im Zweifel ohne Personen/Arm im Bild aufnehmen.")
     if len(stamps) == 0:
         raise SystemExit("keine Frames")
 
     # ---- Modelle
+    sys.path.insert(0, HERE)
     sys.path.insert(0, REPO)
     import torch
-    from navigation.mapping.moge_depth import align_and_fill
-    from navigation.mapping.moge_depth_optim import (MoGe, GradientFusion, GradientFusionTorch,
-                                                     fill, fill_torch)
+    from fill_methods import (align_and_fill, MoGe, GradientFusion, GradientFusionTorch, fill,
+                              fill_torch)
     need_moge = any(v != "raw" for v in variants)
     moge = MoGe() if need_moge else None
     use_gpu = moge is not None and moge.dev.type == "cuda" and not a.cpu_fusion
-    fusion = (GradientFusionTorch() if use_gpu else GradientFusion()) if "B" in variants else None
+    dep_fill = None
+    if a.b_impl == "deployed" and "B" in variants:
+        if not use_gpu:
+            raise SystemExit("--b-impl deployed braucht die GPU")
+        from navigation.mapping.moge_depth_completion import GradientFusion as DepFusion
+        from navigation.mapping.moge_depth_completion import fill as dep_fill
+        fusion = DepFusion()
+    elif "B" in variants:
+        fusion = GradientFusionTorch() if use_gpu else GradientFusion()
+    else:
+        fusion = None
     fov_x = math.degrees(2 * math.atan(W / (2 * K[0, 0])))
     say(f"  MoGe: {'ja' if need_moge else 'nein'} | B auf {'GPU' if use_gpu else 'CPU'} | "
-        f"FoV_x {fov_x:.1f} Grad")
+        f"FoV_x {fov_x:.1f} Grad | B-Implementierung: {a.b_impl}")
 
     T = len(stamps)
     outs = {v: np.lib.format.open_memmap(os.path.join(out, f"depth_{v}.npy"), "w+",
@@ -267,6 +296,10 @@ def main():
             elif v in ("global", "A"):
                 r = 0 if v == "global" else 16
                 d, _, state[v] = align_and_fill(depth, pred, state[v], radius_px=r, eps=0.001)
+            elif dep_fill is not None:
+                d_t, state[v] = dep_fill(torch.from_numpy(depth).to(pred_t.device), pred_t,
+                                         fusion, state[v])
+                d = d_t.cpu().numpy()
             else:
                 if use_gpu:
                     d, _, state[v] = fill_torch(torch.from_numpy(depth).to(pred_t.device),
@@ -288,41 +321,53 @@ def main():
     # ---- Pass 2: Frames verarbeiten (kausal, in Stempel-Reihenfolge)
     say("Pass 2: füllen")
     next_i = 0
-    for topic, msg in iter_bag(bag, [a.color, a.depth, a.mask]):
-        t = stamp_ns(msg.header)
-        if t not in idx:
-            continue
-        key = {a.color: "rgb", a.depth: "depth", a.mask: "mask"}[topic]
-        pending[t][key] = msg
-        # verarbeiten, sobald der nächste Frame vollständig ist (Reihenfolge bleibt kausal)
+    need = {"mask": "mask", "filtered": "filt"}.get(mask_src)
+
+    def complete(p):
+        return "rgb" in p and "depth" in p and (need is None or need in p)
+
+    def drain(final):
+        """Frames streng in Stempel-Reihenfolge verarbeiten (kausal, wie im Betrieb).
+        Ein unvollständiger Frame (z. B. fehlende Maske) wird übersprungen, sobald 30 neuere
+        Frames vollständig vorliegen oder der Bag zu Ende ist."""
+        nonlocal next_i
         while next_i < T:
             tn = stamps[next_i]
             p = pending.get(tn, {})
-            if "rgb" in p and "depth" in p and (not has_mask or "mask" in p):
+            if complete(p):
                 rgb, depth = to_rgb(p["rgb"]), to_depth_m(p["depth"])
                 if depth.shape != (H, W):
                     import cv2
                     depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
-                mask = to_mask(p["mask"]) if "mask" in p else None
+                if mask_src == "mask":
+                    mask = to_mask(p["mask"])
+                elif mask_src == "filtered":
+                    filt = to_depth_m(p["filt"])
+                    if filt.shape != (H, W):
+                        import cv2
+                        filt = cv2.resize(filt, (W, H), interpolation=cv2.INTER_NEAREST)
+                    mask = (depth > 0) & (filt <= 0)
+                else:
+                    mask = None
                 process(next_i, rgb, depth, mask)
-                pending.pop(tn, None)
-                next_i += 1
+            elif final or sum(complete(q) for t, q in pending.items() if t > tn) >= 30:
+                skipped.append(next_i)
+                poses[next_i] = np.nan
             else:
                 break
-        # hängt ein Frame (z. B. Maske fehlt), nach 30 neueren Frames überspringen
-        while next_i < T and len(pending) > 30 and stamps[next_i] < min(pending):
-            skipped.append(next_i)
-            poses[next_i] = np.nan
+            pending.pop(tn, None)
             next_i += 1
-        if len(pending) > 30 and next_i < T and stamps[next_i] in pending:
-            pending.pop(stamps[next_i])
-            skipped.append(next_i)
-            poses[next_i] = np.nan
-            next_i += 1
-    while next_i < T:                      # Rest am Ende unvollständig
-        skipped.append(next_i)
-        poses[next_i] = np.nan
-        next_i += 1
+
+    want = [a.color, a.depth] + ([a.mask] if mask_src == "mask" else
+                                 [a.filtered] if mask_src == "filtered" else [])
+    for topic, msg in iter_bag(bag, want):
+        t = stamp_ns(msg.header)
+        if t not in idx:
+            continue
+        key = {a.color: "rgb", a.depth: "depth", a.mask: "mask", a.filtered: "filt"}[topic]
+        pending[t][key] = msg
+        drain(final=False)
+    drain(final=True)                      # Bag zu Ende: Rest verarbeiten, Unvollständiges überspringen
     if skipped:
         say(f"  WARNUNG: {len(skipped)} Frames unvollständig -> übersprungen (Pose = NaN)")
 
@@ -330,7 +375,7 @@ def main():
         m.flush()
     np.savez(os.path.join(out, "meta.npz"), stamps_ns=np.array(stamps, np.int64), poses=poses,
              K=K, H=H, W=W, variants=np.array(variants), skipped=np.array(skipped, int),
-             has_mask=has_mask, fov_x=fov_x)
+             mask_src=str(mask_src), b_impl=a.b_impl, fov_x=fov_x)
     say(f"fertig: {out}")
 
 

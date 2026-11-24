@@ -5,7 +5,8 @@
 #   z. B. ./record_scene.sh s01_monitor_tisch
 #
 # Ergebnis: $SCENE_ROOT/<szenen_name>/bag/  (mcap, zstd)  +  scene_log.yaml zum Ausfüllen.
-# Vorher: Kamera-Knoten läuft (azure_interface.py), TF map -> camera wird publiziert.
+# Vorher laufen (siehe README 1.3): main: azure_interface.py | refactor: synchronization_buffer,
+# ln_ros_camera_bridge, pointcloud_publisher --raw. Es muss TF map -> camera kommen.
 set -euo pipefail
 
 NAME="${1:?Szenen-Name angeben, z. B. s01_monitor_tisch}"
@@ -21,10 +22,12 @@ TOPICS=(
   /tf
   /tf_static
 )
-# optional, falls vorhanden: Maske der absichtlich entfernten Pixel (Mensch/Arm)
-if ros2 topic list 2>/dev/null | grep -qx /camera/depth/ignore_mask; then
-  TOPICS+=(/camera/depth/ignore_mask)
-fi
+# optional, falls vorhanden: Maske der absichtlich entfernten Pixel (Mensch/Arm/Range)
+#   main:     /camera/depth/ignore_mask (falls nachgerüstet)
+#   refactor: /camera/filtered/depth/image_raw (pointcloud_publisher --raw), Maske wird abgeleitet
+for t in /camera/depth/ignore_mask /camera/filtered/depth/image_raw; do
+  if ros2 topic list 2>/dev/null | grep -qx "$t"; then TOPICS+=("$t"); fi
+done
 TOPICS+=("$@")
 
 if [[ -e "$OUT/bag" ]]; then
@@ -50,7 +53,8 @@ robot: maya
 operator:
 description:            # Was ist zu sehen? Raum, Möbel, Material
 hard_surfaces: []       # z. B. [schwarzer Monitor, Glastür, Chromstuhlbein]
-camera_path:            # azure_interface mit --use_ln oder k4a-Direktpfad?
+branch:                 # main oder refactor
+camera_path:            # main: azure_interface --use_ln oder k4a | refactor: LN-Bridge
 filters_during_recording: {mask_humans: false, filter_robot: false}
 arm_pose:               # z. B. "Transportpose, nicht im Bild"
 people_in_view: false
