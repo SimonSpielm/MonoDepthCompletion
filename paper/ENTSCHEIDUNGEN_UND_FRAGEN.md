@@ -74,3 +74,49 @@ v0.2 enthält die Entwicklungsgeschichte aus dem claude.ai-Chat "RGB-to-Depth-Mo
   `moge_depth_completion.py`. Auf refactor wird die Maske aus `/camera/filtered/depth/image_raw`
   abgeleitet (kein eigenes `ignore_mask`-Topic nötig). Die im Paper beschriebene Reihenfolge
   (MoGe vor Arm/Human-Filter) entspricht der refactor-Pipeline.
+
+## v0.4: Überarbeitung mit dem Skill "research-paper-writing"
+
+**Neue Grafiken**
+- Fig. 1 (Architektur, ganze Breite, TikZ): vier farbige Stufen (Sensing blau, Depth completion
+  orange, Filtering grün, Mapping lila) mit je drei Blöcken, Datenfluss als dicke Pfeile,
+  Roboterzustand (LN, Sync-Buffer, TF) gestrichelt darunter. Die Farben gelten im ganzen Paper.
+- Fig. 2 (Schema, eine Spalte): eine Bildzeile mit Loch. A springt nach ~r zurück auf den globalen
+  Maßstab, B bleibt glatt. Als "Illustration, not data" gekennzeichnet.
+- Algorithm 1: der Füller pro Frame (Variante B).
+
+**Struktur** (Review-Befunde → Änderung)
+- "Design Rationale and Evolution" las sich wie ein Laborbuch → aufgelöst: Modellwahl
+  (PointDiT/DINOv3, PromptDA-Fehlerfall, Marigold-DC) steht jetzt mit Kontrast in Related Work, die
+  Entwicklungsgeschichte ist gestrichen.
+- Experiments vermischte Setup und Ergebnisse → getrennt in *Experimental Setup*, *Results*
+  (Holdout, Lochgröße/Distanz, große Löcher/Stabilität, Karten, Laufzeit) und *Analysis*
+  (Sweep-Befunde, Holdout-Bias, Nähte, Sprünge, Folgen fürs Mapping, Limitations).
+- Arm-, Human-Filter und nvblox zusammengefasst in "Filtering and Volumetric Mapping".
+- Einleitung in 6 Absätzen nach Blöcken A–E, mit Experiment-Teaser und 3 Beiträgen statt 4.
+  Der frühere Beitrag "Tuning-Protokoll" ist jetzt Teil von Beitrag 3.
+- Related Work endet mit einem zusammenfassenden Absatz und grenzt jede Linie ausdrücklich ab.
+- System-Abschnitt: die acht Designentscheidungen der Architektur-Session auf vier verdichtet.
+- Methode: jedes Modul mit Motivation, Design und Vorteil.
+- Neuer Literatureintrag: Marigold-DC (viola2024marigolddc).
+
+**Stil**: keine Gedankenstriche im Text. Anti-Pattern-Wörter entfernt ("critical", "first-order",
+"Notably", "arguably", unnötiges "robust"). Begriffe einheitlich (Variant A/B, alignment, filler).
+
+**Belege für die Behauptungen**
+
+| Behauptung | Beleg | Status |
+|---|---|---|
+| Beide Varianten ~4× besser als globaler Maßstab | Tab. main | belegt |
+| A gewinnt Holdout (2.75 vs 3.27 %) | Tab. main | belegt |
+| Vorsprung von A schrumpft mit Lochgröße (0.9 → 0.25 pp) | Tab. breakdown | belegt |
+| A fällt nach ~r auf globalen Maßstab zurück | Methode (Konstruktion), Fig. 2 | analytisch belegt |
+| B stetig, Abklinglänge ~400 px | Sec. Variant B (Herleitung) | analytisch belegt |
+| A springt zeitlich, B nicht | Tab. stability, Fig. temporal | **Beleg fehlt (Roboter-Lauf)** |
+| Ranking kehrt sich bei großen Löchern um | Tab. stability, Fig. distance | **Beleg fehlt** |
+| B ergibt bessere Karten | Tab. maps, Fig. mapdiff | **Beleg fehlt** |
+| GPU-Füller läuft im Kameratakt | Tab. runtime (GPU-Zeilen) | **Beleg fehlt**, Behauptung entschärft |
+
+**Offene Review-Punkte**: Für die Komponenten von B (Kantengewichte, Abklingterm, IRLS) gibt es keine
+Ablation außer dem Sweep. Variante A wird nicht in Algorithmusform gezeigt (Absicht, sie ist
+geschlossen formuliert).
