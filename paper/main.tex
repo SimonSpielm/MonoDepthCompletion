@@ -312,41 +312,66 @@ repeated \(K\) times along fixed pixel rays.}
 \end{figure}
 
 \textbf{MoGe.} MoGe~\cite{wang2025moge} maps an image to a point map
-\(P\in\R^{H\times W\times3}\) that is defined only up to a scale \(s\) and a
-shift \(t_z\) along the optical axis. Focal length and shift follow from the
-predicted points by minimising the reprojection error; with a known field of
-view, the public implementation fixes the focal length, which is how we use it.
-The network is a DINOv2~\cite{oquab2024dinov2} encoder with a convolutional
-decoder and heads for the point map and a validity mask. For training, each
-prediction is aligned to the ground truth with a robust solver that minimises
-a truncated, inverse-depth-weighted \(L_1\) residual, globally and in local
-regions. Stage~1 of our filler applies the same idea, restricted to scale
-(Sec.~\ref{sec:global}).
+\(P\in\R^{H\times W\times3}\), one 3-D point per pixel, that is defined only up to
+a scale \(s\) and a shift \(t_z\) along the optical axis. This affine invariance
+removes the focal-length ambiguity of scale-only point maps. At inference, focal
+length and shift follow from the predicted points by minimising their
+reprojection error. With a known field of view, the public implementation fixes
+the focal length and solves only for the shift, which is how we use it. The
+network is a DINOv2~\cite{oquab2024dinov2} Vision Transformer encoder with a
+convolutional decoder and heads for the point map and a validity mask; the
+number of image tokens trades detail against latency.
+
+Because \(P\) is affine-invariant, a prediction \(\hat P\) is compared with the
+ground truth \(P^\ast\) only after the best alignment,
+\begin{equation}
+  (s^\ast,t^\ast)=\arg\min_{s,t}\sum_i \frac{1}{z_i}\,
+  \min\!\big(\|s\hat p_i+t-p^\ast_i\|_1,\,\kappa\big),
+  \label{eq:roe}
+\end{equation}
+a truncated, inverse-depth-weighted \(L_1\) objective that ignores gross
+outliers. The global loss applies it to the whole image; a multi-scale local
+loss applies it inside spheres around sampled points, so that local shape is
+supervised even when the global alignment is imperfect. Stage~1 of our filler
+uses the same principle, a robust alignment to measurements, restricted to
+scale (Sec.~\ref{sec:global}).
 
 \textbf{MoGe-2.} MoGe-2~\cite{wang2025moge2} keeps the affine-invariant point map
-and adds one global metric scale \(s\), predicted by an MLP on the class token;
-the metric point map is \(sP\). To sharpen its real training data, MoGe-2
-completes unreliable regions by a Poisson problem in log depth with the
-remaining measurements as boundary condition, closely related to what
-Variant~B of our filler does at inference (Sec.~\ref{sec:fusion}).
+and adds a single global metric scale \(s\), predicted by a two-layer MLP on the
+class token of the encoder and trained against the optimal scale of
+Eq.~\eqref{eq:roe} in log space. The metric point map is \(sP\). The authors
+report that this decoupling is more accurate than predicting metric points
+directly, because the affine-invariant space stays well normalised, and that
+metric scale needs the global information of the class token. To sharpen its
+real training data, MoGe-2 completes unreliable regions by a Poisson problem in
+log depth with the remaining measurements as boundary condition. Variant~B of
+our filler solves a closely related problem at inference, with the sensor depth
+as boundary condition (Sec.~\ref{sec:fusion}).
 
-\textbf{MoGe-3 and the boundary to MoGe-2.} MoGe-3~\cite{kong2026moge3} keeps the
-MoGe-2 base unchanged up to the metric point map and only adds a refinement
-stage (Fig.~\ref{fig:moge}). Each point is written as \((u,v,\zeta)\) with
-\(\zeta=\log Z\) and placed on a sparse voxel shell. A sparse 3-D U-Net, fed with
-the DINOv2 features, predicts a log-depth residual, and the step is repeated
-\(K=3\) times; the pixel rays \((u,v)\) stay fixed. The authors report
-\(121\) instead of \(39\,\)ms (ViT-L, A100) and gains mainly in local detail
-(points within \(1\,\%\): \(46.6\to55.9\,\%\)), while the metric-depth error stays
-near \(15\,\%\).
+\textbf{MoGe-3 and the boundary to MoGe-2.} MoGe-3~\cite{kong2026moge3} is
+initialised from MoGe-2 and keeps its base unchanged up to the metric point map:
+encoder, point map, mask, normals and scale. It adds only a refinement stage
+(Fig.~\ref{fig:moge}). Each point is written as \((u,v,\zeta)\) with
+\(u=X/Z\), \(v=Y/Z\) and \(\zeta=\log Z\). Pixel \((i,j)\) occupies the voxel
+\((i,j,\mathrm{round}(N_\zeta\zeta_{ij}))\) of a sparse shell with \(N_\zeta=200\)
+log-depth bins, so that two voxels are neighbours only if their pixels are
+adjacent and their depths are close. A sparse 3-D U-Net, which receives the
+DINOv2 features at its bottleneck, predicts a residual \(\Delta\zeta\) per voxel,
+and \(\zeta\leftarrow\zeta+\Delta\zeta\) is repeated \(K=3\) times; the rays
+\((u,v)\) stay fixed. With \(K=0\) the latency equals MoGe-2. With \(K=3\) the
+authors report \(121\) instead of \(39\,\)ms (ViT-L, \(700^2\) pixels, A100). The
+gains are mainly local (points within \(1\,\%\) of the local ground truth:
+\(46.6\to55.9\,\%\)), while the metric-depth error stays near \(15\,\%\). The
+authors name flying points at object boundaries as a remaining limitation.
 
-\textbf{Consequence.} In both versions the metric scale is a single factor with
-about \(15\,\%\) error, so the prediction must be aligned to the sensor before it
-can fill holes, and its local shape is more reliable than its absolute
-position. We deploy MoGe-2 for its latency (\(40\,\)ms,
-Table~\ref{tab:runtime}); MoGe-3 is a drop-in replacement at about three times
-the network cost. \todo{measure MoGe-3 latency and holdout accuracy on the
-robot cache}
+\textbf{Consequence for depth completion.} In both versions the metric scale is a
+single factor predicted from image content, with about \(15\,\%\) error. The
+prediction must therefore be aligned to the sensor before it can fill holes,
+and MoGe-3 does not remove this need. Its local shape is more reliable than its
+absolute position, which is the assumption behind Stage~2 of our filler. We
+deploy MoGe-2 for its latency (\(40\,\)ms, Table~\ref{tab:runtime}); MoGe-3 is a
+drop-in replacement at about three times the network cost.
+\todo{measure MoGe-3 latency and holdout accuracy on the robot cache}
 
 \subsection{nvblox: GPU-Accelerated TSDF Mapping}
 \label{sec:bg-nvblox}
@@ -773,31 +798,42 @@ allocation (\(8^3\) voxels in 3-D, drawn as \(8^2\)).}
 \end{figure}
 
 \textbf{TSDF.} A TSDF stores per voxel a signed distance
-\(\Phi\in[-\varepsilon_T,\varepsilon_T]\) to the nearest surface and a weight
-\(\omega\ge0\). For each depth frame, the voxel centre is projected into the
-image, and the distance \(\phi\) between measured depth and voxel depth,
-truncated to \(\pm\varepsilon_T\), is fused by a weighted
-average~\cite{curless1996volumetric},
+\(\Phi\in[-\varepsilon_T,\varepsilon_T]\) to the nearest surface, positive in
+front of it, and a weight \(\omega\ge0\); the surface is the zero level set of
+\(\Phi\). Projective integration approximates the distance along the camera ray:
+the voxel centre is projected into the depth image, and the difference \(\phi\)
+between measured depth and voxel depth, truncated to \(\pm\varepsilon_T\), is
+fused by a weighted average~\cite{curless1996volumetric},
 \begin{equation}
   \Phi \leftarrow \frac{\omega\,\Phi+\nu\,\phi}{\omega+\nu},\qquad
   \omega \leftarrow \min(\omega+\nu,\;\omega_{\max}),
   \label{eq:tsdf}
 \end{equation}
-with observation weight \(\nu\). Voxels that no valid ray reaches keep
-\(\omega=0\) and stay unobserved (Fig.~\ref{fig:tsdf}).
+with an observation weight \(\nu\) that is constant or follows a sensor noise
+model. Voxels more than \(\varepsilon_T\) behind the surface are not updated, and
+voxels that no valid ray reaches keep \(\omega=0\) and stay unobserved
+(Fig.~\ref{fig:tsdf}).
 
-\textbf{Accumulation.} Averaging reduces independent per-frame errors with the
-number of observations \(n\) (variance \(\sigma^2/n\)). An error that repeats in
-every frame, such as a fill that is wrong at the same place each time, is not
-reduced. This is why Sec.~\ref{sec:analysis} examines the temporal stability
-of the filler.
+\textbf{Accumulation over time.} Eq.~\eqref{eq:tsdf} is why the map is more
+stable than single frames. If the per-frame errors of \(\phi\) at a voxel are
+independent with variance \(\sigma^2\), the average over \(n\) observations has
+variance \(\sigma^2/n\). An error that repeats in every frame, such as a fill
+that is wrong at the same place each time, enters every term and is not
+reduced; only later observations that disagree with it remove it. This is why
+Sec.~\ref{sec:analysis} examines the temporal stability of the filler.
 
 \textbf{nvblox.} nvblox~\cite{millane2024nvblox} implements this on the GPU with
 voxel hashing~\cite{niessner2013voxelhashing}: a hash table maps block indices to
 blocks of \(8^3\) voxels, which are allocated only where space has been
-observed, and all voxels in view are updated in parallel. The authors report up
-to \(177\times\) faster integration than Voxblox~\cite{oleynikova2017voxblox}. We
-use only the TSDF layer through the PyTorch interface: one call integrates a
+observed. For each frame, nvblox ray-traces the block grid to find the blocks
+in view, allocates missing ones, and updates all their voxels in parallel by
+projecting the voxel centres into the depth image. TSDF, colour, occupancy, a
+Euclidean distance field and a mesh are layers on the same block structure.
+The authors report up to \(177\times\) faster integration than
+Voxblox~\cite{oleynikova2017voxblox}. For dynamic scenes, nvblox can put
+segmented people into a separate, decaying occupancy layer; we remove people in
+image space instead (Sec.~\ref{sec:humanfilter}), so they never enter the map.
+We use only the TSDF layer through the PyTorch interface: one call integrates a
 depth frame with its pose, another queries \(\Phi\) and \(\omega\) at given points
 (Sec.~\ref{sec:nvblox}).
 
