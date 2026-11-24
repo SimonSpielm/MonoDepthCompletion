@@ -1,0 +1,2 @@
+block,down,lam,mu_near,mu_far,far_band,sigma_edge,z_ref,outlier,iters,tol,ema,absrel,mae_cm,rmse,delta1,coverage,ms,n,bins
+32,-1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.12918578845759232,15.817636400461197,0.4114962508281072,0.9661315996352182,1.0,0.0,60,0.22555;0.091263;0.095201;0.060528;;0.1908

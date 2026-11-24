@@ -1,0 +1,11 @@
+# Large sweep caches (frames.npz ~387 MB, preds.npz ~332 MB) - not suitable for git
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
