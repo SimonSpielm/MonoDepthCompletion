@@ -37,8 +37,8 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
 | 1 | `ln_camera_publisher.py` | Azure Kinect per k4a auslesen, RGB, registrierte Tiefe und K mit Zeitstempel auf LN publishen. **Nur mit lokal angeschlossener Kamera**, auf dem echten System gibt es den Treiber schon. | k4a | LN `camera.perception/*` |
 | 2 | `ln_ros_camera_bridge.py` | LN-Kameradaten 1:1 nach ROS. `read()` blockiert, also kein Timer: jeder Frame wird sofort weitergereicht. | LN | `/camera/*` (roh) |
 | 3 | `moge_depth_completion.py` | MoGe-2 + Gradienten-Fusion (CG auf der GPU) füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/*` | `/camera/completed/*` |
-| 4 | `pointcloud_publisher.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--raw` nimmt die rohen Topics (ohne Schritt 3). | `/camera/completed/*` | `/tf`, `/camera/filtered/*` |
-| 5 | `start_nvblox.py` | TSDF-Karte aus der gefilterten Tiefe, belegte Voxel um die Kamera als Punktwolke. LN-Service `nvblox.reset_map`. | `/camera/filtered/depth/image_raw` | `/nvblox/occupied_points_rgb` |
+| 4 | `pointcloud_publisher.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, fliegende Pixel an Tiefenkanten, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--raw` nimmt die rohen Topics (ohne Schritt 3). | `/camera/completed/*` | `/tf`, `/camera/filtered/*` |
+| 5 | `start_nvblox.py` | TSDF-Karte aus der gefilterten Tiefe, belegte Voxel um die Kamera als Punktwolke, isolierte Voxel (Speckles) entfernt. LN-Service `nvblox.reset_map`. | `/camera/filtered/depth/image_raw` | `/nvblox/occupied_points_rgb` |
 | 5' | `start_octomap_mapping.py` | Alternative: ROS `octomap_server` auf der gefilterten Punktwolke. | `/camera/filtered/points` | `/octomap_point_cloud_centers` |
 | 6 | `collision_map_provider.py` | `CollisionMapProvider`: holt die Karte (nvblox oder octomap, `MAP_BACKEND`) nach Python, baut COAL-Octree / AABBs / FROCC-Map und filtert optional ein Objekt heraus. | Karten-Topic | Python-API |
 
@@ -125,6 +125,16 @@ schnellen Pfad von `CollisionMapProvider` (`use_pointcloud_fast`).
 Holdout-Fehlerauswertung sind entfallen. Die Parameter sind die Optima aus
 `moge_sweep_ergebnisse/moge_optim_sweep_ergebnisse.md`. Die Fusions-Mathematik ist
 unverändert aus `moge_depth_optim.py` übernommen.
+
+**Schwebende Voxel an zwei Stellen filtern, ohne die Rate zu drücken.** Die meisten
+schwebenden Voxel stammen von fliegenden Pixeln an Tiefenkanten (Mischwerte aus Vorder- und
+Hintergrund). Schritt 4 verwirft deshalb Pixel, deren Tiefenspanne im 3×3-Fenster mehr als
+`EDGE_REL_THRESH` (10 %) der eigenen Tiefe beträgt. Das sind zwei Morphologie-Operationen,
+ca. 3 ms pro Frame auf der CPU, und streifende Flächen wie der Boden bleiben erhalten. Was
+danach noch übrig ist, entfernt Schritt 5 im Abfragefenster: belegte Voxel mit weniger als
+`min_neighbors` (Standard 1) belegten Nachbarn in der 26er-Nachbarschaft. Das Zählen läuft als
+3×3×3-Pooling auf der GPU und kostet deutlich weniger als die eigentliche Abfrage. Die Karte
+selbst bleibt unverändert; der Filter wirkt nur auf die publizierte Punktwolke.
 
 ## Topics
 

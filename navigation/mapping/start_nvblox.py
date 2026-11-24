@@ -9,6 +9,7 @@ Publishes the occupied voxels around the camera as /nvblox/occupied_points_rgb.
 import links_and_nodes as ln
 import numpy as np
 import torch
+import torch.nn.functional as F
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
@@ -27,10 +28,12 @@ from nvblox_torch.mapper import Mapper, QueryType
 from nvblox_torch.projective_integrator_types import ProjectiveIntegratorType
 from nvblox_torch.sensor import Sensor
 
-def make_local_offsets(half_xy: float, z_min: float, z_max: float, vs: float) -> torch.Tensor:
+def make_local_offsets(half_xy: float, z_min: float, z_max: float, vs: float):
     """
     Offsets der Voxelzentren relativ zu einem Grid-Ursprung, der auf einem
     Vielfachen von vs liegt. Zentren bei (i + 0.5) * vs -> exakt nvblox-Voxelzentren.
+    Gibt (offsets (N, 3), Gitterform (nx, ny, nz)) zurück; die Reihenfolge ist x-y-z
+    (meshgrid "ij"), offsets.view(nx, ny, nz, 3) ist also wieder das 3D-Gitter.
     """
     n_xy = int(round(half_xy / vs))
     ixy = torch.arange(-n_xy, n_xy, dtype=torch.float32)
@@ -39,7 +42,7 @@ def make_local_offsets(half_xy: float, z_min: float, z_max: float, vs: float) ->
 
     X, Y, Z = torch.meshgrid(ixy, ixy, iz, indexing="ij")
     offs = torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)], dim=1)
-    return (offs + 0.5) * vs          # z ist hier bereits absolut (global_frame)
+    return (offs + 0.5) * vs, X.shape          # z ist hier bereits absolut (global_frame)
 
 
 def create_pointcloud2_xyzrgb(points_xyz, colors_rgb, frame_id, stamp) -> PointCloud2:
@@ -117,6 +120,10 @@ class TsdfOccupiedColoredPointCloud(Node):
         self.declare_parameter("w_min", 0.5)
         self.declare_parameter("occ_band_vox", 0.5)
 
+        # Speckle-Filter: belegte Voxel mit weniger als min_neighbors belegten Nachbarn
+        # (26er-Nachbarschaft) werden verworfen. 0 = aus, 1 = nur ganz isolierte Voxel.
+        self.declare_parameter("min_neighbors", 1)
+
         self.declare_parameter("max_points", 300000)
         self.declare_parameter("tf_timeout_s", 0.02)
         self.declare_parameter("pointcloud_topic", "/nvblox/occupied_points_rgb")
@@ -133,6 +140,7 @@ class TsdfOccupiedColoredPointCloud(Node):
         z_min, z_max = (float(v) for v in gp("query_z_range"))
         self.w_min = float(gp("w_min"))
         self.occ_thresh_m = float(gp("occ_band_vox")) * self.voxel_size
+        self.min_neighbors = int(gp("min_neighbors"))
         self.max_points = int(gp("max_points"))
         self.tf_timeout_s = float(gp("tf_timeout_s"))
         self.pc_topic = gp("pointcloud_topic")
@@ -164,7 +172,8 @@ class TsdfOccupiedColoredPointCloud(Node):
         reset_svc.do_register()
 
         # lokale Offsets einmal auf der GPU vorberechnen
-        self.local_offsets = make_local_offsets(self.half_xy, z_min, z_max, self.voxel_size).to("cuda")
+        self.local_offsets, self.grid_shape = make_local_offsets(self.half_xy, z_min, z_max, self.voxel_size)
+        self.local_offsets = self.local_offsets.to("cuda")
         self.get_logger().info(f"Query window: {self.local_offsets.shape[0] / 1e6:.1f} Mio. points")
 
         # Zustand
@@ -251,6 +260,17 @@ class TsdfOccupiedColoredPointCloud(Node):
         finally:
             svc.respond()
 
+    def _remove_speckles(self, occupied: torch.Tensor) -> torch.Tensor:
+        """Isolierte Voxel entfernen: Nachbarn zählen per 3x3x3-Mittelwert auf der GPU.
+
+        Ein Pooling über das Abfragegitter (~5 Mio. Voxel) dauert auf der GPU unter einer
+        Millisekunde und ist damit klein gegen query_layer. Voxel am Fensterrand haben
+        weniger Nachbarn und fallen dort etwas leichter heraus.
+        """
+        occ = occupied.view(1, 1, *self.grid_shape).to(torch.float16)
+        n_nb = F.avg_pool3d(occ, 3, stride=1, padding=1, count_include_pad=True) * 27 - occ
+        return occupied & (n_nb.view(-1) > self.min_neighbors - 0.5)
+
     def on_step(self):
         self.ln_clnt.wait_and_handle_service_group_requests(None, 0)
 
@@ -268,6 +288,8 @@ class TsdfOccupiedColoredPointCloud(Node):
         out = self.mapper.query_layer(QueryType.TSDF, query_pts, mapper_id=0)
         dist, wgt = out[:, 0], out[:, 1]
         occupied = (wgt > self.w_min) & (dist < self.occ_thresh_m)   # unknown (wgt=0) -> frei
+        if self.min_neighbors > 0:
+            occupied = self._remove_speckles(occupied)
         idx = torch.nonzero(occupied, as_tuple=False).squeeze(1)
         if idx.numel() == 0:
             return

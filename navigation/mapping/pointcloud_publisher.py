@@ -9,7 +9,8 @@ Subscribes the completed camera frame of moge_depth_completion.py (or, with
     /camera/filtered/depth/image_raw   filtered depth (16UC1, mm)  -> nvblox
     /camera/filtered/points            filtered pointcloud (camera frame) -> octomap / collision map
 
-Filters: min/max range, humans (mediapipe, --mask_humans), robot arm (--filter_robot).
+Filters: min/max range, flying pixels at depth edges, humans (mediapipe, --mask_humans),
+robot arm (--filter_robot).
 
 The frame's header.stamp is the original LN capture timestamp. It is used to look up
 odometry and joint angles in the SynchronizationBuffer, and all outputs (incl. TF)
@@ -27,6 +28,7 @@ sys.path.insert(0, main_dir)
 import argparse
 import time
 
+import cv2
 import numpy as np
 import rclpy
 import tf2_ros
@@ -48,12 +50,29 @@ MIN_DIST = 0#820      # in mm
 POINTCLOUD_DOWNSAMPLING = 1.0
 HUMAN_PADDING = 100 #px
 NOINFO_BEHAVIOUR = 0 #65535 #0
+EDGE_REL_THRESH = 0.1  # flying pixels: depth range in 3x3 > 10 % of the depth -> drop, 0 = off
 
 INPUT_TOPICS = {
     "completed": ("camera/completed/color/image_raw", "camera/completed/depth/image_raw",
                   "camera/completed/camera_info"),
     "raw": ("camera/color/image_raw", "camera/depth/image_raw", "camera/color/camera_info"),
 }
+
+
+def flying_pixel_mask(depth):
+    """Pixels at depth discontinuities (mixed foreground/background, "flying pixels").
+
+    A pixel is dropped if the depth range (max - min) in its 3x3 neighbourhood exceeds
+    EDGE_REL_THRESH times its own depth. Holes (0) are ignored as neighbours.
+    Grazing surfaces (floor at 8 m: ~4 % per 2 px) stay well below the threshold.
+    """
+    valid = depth > 0
+    if EDGE_REL_THRESH <= 0:
+        return np.zeros(depth.shape, dtype=bool)
+    kernel = np.ones((3, 3), np.uint8)
+    dmax = cv2.dilate(depth, kernel)
+    dmin = cv2.erode(np.where(valid, depth, np.uint16(65535)), kernel)
+    return valid & ((dmax.astype(np.float32) - dmin) > EDGE_REL_THRESH * depth)
 
 
 def camera_params_from_info(info: CameraInfo) -> dict:
@@ -151,6 +170,10 @@ class PointcloudPublisher:
         mask_far  = (depth > 0) & (depth >= MAX_DIST)
         ignore_mask |= (mask_far | mask_near)
         depth[mask_far | mask_near] = 0
+
+        edge_mask = flying_pixel_mask(depth)
+        ignore_mask |= edge_mask
+        depth[edge_mask] = 0
 
         if self.mask_humans:
             depth, human_mask = self.mask_human(rgb, depth)
