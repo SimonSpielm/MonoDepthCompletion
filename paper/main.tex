@@ -61,7 +61,22 @@ Wessling, Germany}
 San Francisco, CA, USA}
 }
 
+% title block followed by a full-width disclaimer
+\twocolumn[{%
+\renewcommand\twocolumn[1][]{#1}%
 \maketitle
+\vspace{-1.5em}
+\begin{center}
+\fcolorbox{cAux}{cAux!6}{\parbox{0.94\textwidth}{\small
+\textbf{Disclaimer.} This document makes no scientific claim and has not been
+peer-reviewed. It is a technical report on the author's work. It documents the
+system, the design decisions and the reasons behind them, and records the
+results obtained. The comparisons are based on a small number of recordings on
+a single robot and should be read as engineering observations, not as
+validated scientific findings. The IEEE format is used only for readability.}}
+\end{center}
+\vspace{0.8em}
+}]
 
 % =========================================================================
 \begin{abstract}
