@@ -53,6 +53,8 @@ class LnRosCameraBridge:
         self.info_msg = self.get_camera_info_from_camk(FRAME_CAM)  # color and depth share K (registered depth)
 
         self._last_ts = None
+        self._frames = 0
+        self._skipped = 0
         self._last_update = time.time()
         self.node.get_logger().info("Init done...")
 
@@ -107,15 +109,21 @@ class LnRosCameraBridge:
                 self.node.get_logger().warning("Failed to read RGB or depth.")
                 continue
             if ts == self._last_ts:
+                self._skipped += 1
                 continue
             self.publish_rgbd(rgb, depth, ts)
             self._last_ts = ts
+            self._frames += 1
 
             now = time.time()
-            self.node.get_logger().info(
-                f"Published with {1.0 / max(now - self._last_update, 1e-6):.2f} Hz",
-                throttle_duration_sec=5.0)
-            self._last_update = now
+            elapsed = now - self._last_update
+            if elapsed >= 5.0:
+                self.node.get_logger().info(
+                    f"Published with {self._frames / elapsed:.2f} Hz "
+                    f"(frames {self._frames}, skipped duplicate stamps {self._skipped})")
+                self._frames = 0
+                self._skipped = 0
+                self._last_update = now
 
 
 def main():

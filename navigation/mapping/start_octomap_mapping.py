@@ -56,7 +56,7 @@ def generate_launch_description():
             }],
 
             remappings=[
-                ('cloud_in', '/camera/filtered/points')   # pointcloud_publisher.py,
+                ('cloud_in', '/camera/filtered/points')   # camera_frame_filter.py,
             ],
 
             # Log-Level runterdrehen, wenn alles tut:
