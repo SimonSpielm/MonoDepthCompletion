@@ -1,19 +1,19 @@
 """
-Monokulare Tiefenmodelle hinter einer gemeinsamen Schnittstelle, ohne ROS.
+Monocular depth models behind one common interface, without ROS.
 
     model = load_model("moge2-b", num_tokens=600)
-    depth = model(rgb, fov_x)     # rgb (H, W, 3) uint8, fov_x [Grad] oder None
-                                  # -> torch-Tensor (H, W) [m] auf model.dev, ungültig = inf
+    depth = model(rgb, fov_x)     # rgb (H, W, 3) uint8, fov_x [deg] or None
+                                  # -> torch tensor (H, W) [m] on model.dev, invalid = inf
 
-Genutzt vom ROS-Knoten (moge_depth_completion.py), vom Viewer (dev/depth_viewer.py) und vom
-Offline-Benchmark (bench/), damit alle dasselbe Modell gleich aufrufen.
+Used by the ROS node (depth_completion_node.py), the viewer (viewer.py) and the
+offline benchmark (bench/), so all of them call a model the same way.
 
-Modelle (Laufzeit M4 Pro/MPS, 1280x720, siehe bench/README.md):
-  moge        MoGe-2 vitl            Paket moge
-  moge2-s     MoGe-2 vits-normal     Paket moge
-  moge2-b     MoGe-2 vitb-normal     Paket moge (Standard im ROS-Knoten, 600 Tokens ~9 Hz)
-  moge3-l     MoGe-3 vitl            Paket moge; Verfeinerung nur mit CUDA (flex_gemm/Triton)
-  depthpro2-s|b|l|h  Apple Depth Pro 2   Paket depth_pro_2, Gewichte nur für Forschung
+Models (runtime and accuracy: bench/README.md):
+  moge        MoGe-2 vitl            package moge
+  moge2-s     MoGe-2 vits-normal     package moge
+  moge2-b     MoGe-2 vitb-normal     package moge (default of the ROS node, 600 tokens ~9 Hz)
+  moge3-l     MoGe-3 vitl            package moge; refinement only with CUDA (flex_gemm/Triton)
+  depthpro2-s|b|l|h  Apple Depth Pro 2   package depth_pro_2, weights for research use only
 """
 import math
 import sys
@@ -28,7 +28,7 @@ MOGE = {"moge": "Ruicheng/moge-2-vitl",
         "moge3-l": "Ruicheng/moge-3-vitl"}
 DEPTHPRO = ("depthpro2-s", "depthpro2-b", "depthpro2-l", "depthpro2-h")
 MODELS = tuple(MOGE) + DEPTHPRO
-MAX_DEPTH = 50.0   # [m] darüber (Himmel) gilt als ungültig
+MAX_DEPTH = 50.0   # [m] anything beyond (sky) counts as invalid
 
 
 def default_device():
@@ -37,12 +37,12 @@ def default_device():
 
 
 def load_model(name, num_tokens=1200, device=None, stream=False):
-    """num_tokens gilt nur für MoGe, stream nur für Depth Pro 2."""
+    """num_tokens applies to MoGe only, stream to Depth Pro 2 only."""
     if name in MOGE:
         return MoGe(MOGE[name], num_tokens, device)
     if name in DEPTHPRO:
         return DepthPro2(name, device, stream)
-    raise ValueError(f"unbekanntes Modell '{name}', verfügbar: {', '.join(MODELS)}")
+    raise ValueError(f"unknown model '{name}', available: {', '.join(MODELS)}")
 
 
 def _invalid_to_inf(d):
@@ -51,7 +51,7 @@ def _invalid_to_inf(d):
 
 
 class MoGe:
-    """MoGe-2 oder MoGe-3. Die Brennweite (fov_x) wird übergeben, die Tiefe ist dann metrisch."""
+    """MoGe-2 or MoGe-3. The field of view (fov_x) is passed in, so the depth is metric."""
 
     def __init__(self, repo, num_tokens=1200, device=None):
         self.dev = torch.device(device or default_device())
@@ -59,9 +59,9 @@ class MoGe:
         self.kw = {}
         load_kw = {}
         if "moge-3" in repo:
-            from_v3 = self.dev.type == "cuda"
-            self.kw["refine_steps"] = 3 if from_v3 else 0
-            if not from_v3:            # Verfeinerung braucht flex_gemm (CUDA/Triton)
+            refine = self.dev.type == "cuda"
+            self.kw["refine_steps"] = 3 if refine else 0
+            if not refine:             # the refinement needs flex_gemm (CUDA/Triton)
                 _stub_flex_gemm()
                 load_kw = {"model_kwargs": {"refiner": None}}
             from moge.model.v3 import MoGeModel
@@ -74,7 +74,7 @@ class MoGe:
     @torch.inference_mode()
     def __call__(self, rgb, fov_x):
         img = torch.from_numpy(rgb).to(self.dev).permute(2, 0, 1).float() / 255.0
-        # use_fp16 nutzt intern CUDA-Autocast und bricht auf MPS ab
+        # use_fp16 uses CUDA autocast internally and fails on MPS
         out = self.model.infer(img, fov_x=fov_x, num_tokens=self.num_tokens,
                                use_fp16=self.dev.type == "cuda", **self.kw)
         d = out["depth"].float()
@@ -84,7 +84,7 @@ class MoGe:
 
 
 def _stub_flex_gemm():
-    """Platzhalter, damit moge.model.v3 ohne flex_gemm importierbar ist (Verfeinerung aus)."""
+    """Placeholder so that moge.model.v3 can be imported without flex_gemm (refinement off)."""
     if "flex_gemm" in sys.modules:
         return
     root, nn_, ops = (types.ModuleType(n) for n in ("flex_gemm", "flex_gemm.nn", "flex_gemm.ops"))
@@ -96,9 +96,9 @@ def _stub_flex_gemm():
 
 
 class DepthPro2:
-    """Apple Depth Pro 2. stream=False: jedes Bild einzeln (deterministisch). stream=True: Live-
-    Stream (unbuffered), sieht die 15 Bilder davor und ist zeitlich stabiler; die Brennweite wird
-    beim ersten Bild festgelegt. Nur für eine Kamera mit fester Bildgröße."""
+    """Apple Depth Pro 2. stream=False: every image on its own (deterministic). stream=True: live
+    stream (unbuffered), attends to the 15 previous frames and is temporally more stable; the
+    focal length is fixed at the first frame. Only for one camera with a fixed image size."""
 
     def __init__(self, name="depthpro2-s", device=None, stream=False):
         from depth_pro_2 import create_model_and_transforms

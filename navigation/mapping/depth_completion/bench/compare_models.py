@@ -4,14 +4,14 @@ Run several monocular depth models on the same RGB image and compare them
 (default: Apple Depth Pro 2 S and B).
 
 Prints runtime per model and an edge-sharpness indicator, and writes a PNG with
-RGB | one panel per model (shared turbo colormap) plus each model's depth edges.
+RGB | one panel per model (shared turbo colormap), below each model's depth edges.
 
     python compare_models.py image.jpg [--fov-x 90] [--models depthpro2-s depthpro2-b]
     python compare_models.py --frames frames.npz --index 0
 
-Edge sharpness: fraction of pixels whose 3x3 relative depth range lies between
-2 % and 10 %. Real depth edges are steps (range > 10 %) and flat surfaces stay
-below 2 %, so a high value means many "ramp" pixels, i.e. soft, bleeding edges.
+Edge sharpness: fraction of pixels whose 3x3 relative depth range lies between 2 % and 10 %.
+Real depth edges are steps (range > 10 %) and flat surfaces stay below 2 %, so a high value
+means many "ramp" pixels, i.e. soft, smeared edges.
 """
 import argparse
 import math
@@ -50,9 +50,9 @@ def main():
     ap.add_argument("image", nargs="?")
     ap.add_argument("--frames")
     ap.add_argument("--index", type=int, default=0)
-    ap.add_argument("--fov-x", type=float, default=None, help="horizontales Sichtfeld [Grad]")
+    ap.add_argument("--fov-x", type=float, default=None, help="horizontal field of view [deg]")
     ap.add_argument("--models", nargs="+", choices=MODELS, default=["depthpro2-s", "depthpro2-b"])
-    ap.add_argument("--num-tokens", type=int, default=1200, help="nur MoGe")
+    ap.add_argument("--num-tokens", type=int, default=1200, help="MoGe only")
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default="compare_models.png")
     a = ap.parse_args()
@@ -71,7 +71,7 @@ def main():
     results = []
     for name, kind, tok in runs:
         model = load_model(kind, tok, a.device)
-        model(rgb, fov)                                    # Aufwärmen
+        model(rgb, fov)                                    # warm-up
         if model.dev.type == "mps":
             torch.mps.synchronize()
         ts = []
@@ -108,8 +108,8 @@ def main():
         soft = edge_mask_np(e, 0.02) & ~edge_mask_np(e, 0.10)
         hard = edge_mask_np(e, 0.10)
         vis = np.zeros(d.shape + (3,), np.uint8)
-        vis[soft] = (0, 165, 255)      # orange: Rampe (weiche Kante)
-        vis[hard] = (255, 255, 255)    # weiß: harte Kante
+        vis[soft] = (0, 165, 255)      # orange: ramp (soft edge)
+        vis[hard] = (255, 255, 255)    # white: hard edge
         vis = cv2.resize(vis, (W, H), interpolation=cv2.INTER_AREA)
         label(vis, f"Kanten: weiss hart, orange Rampe {100 * ramp_fraction(d):.1f} %")
         bottom.append(vis)

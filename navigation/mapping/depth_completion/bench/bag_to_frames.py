@@ -4,7 +4,7 @@ Extract RGB/depth pairs from a ROS 1 or ROS 2 bag into the frames.npz format of
 depth_bench.py (rgb uint8, depth float32 [m], fov_x [deg]). No ROS install needed,
 only `pip install rosbags`.
 
-    python bag_to_frames.py ../../../rosbags/depth_estimation --out still1.npz --max 60
+    python bag_to_frames.py ../../../../rosbags/depth_estimation --out still1.npz --max 60
 
 Pairs are matched by identical header.stamp (as published by ln_ros_camera_bridge);
 `--step` keeps every k-th pair. fov_x comes from the color camera_info (fx, width).
@@ -38,8 +38,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("bag")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--max", type=int, default=60, help="maximale Anzahl Paare")
-    ap.add_argument("--step", type=int, default=1, help="jedes k-te Paar behalten")
+    ap.add_argument("--max", type=int, default=60, help="maximum number of pairs")
+    ap.add_argument("--step", type=int, default=1, help="keep every k-th pair")
     ap.add_argument("--color", default=COLOR)
     ap.add_argument("--depth", default=DEPTH)
     ap.add_argument("--info", default=INFO)

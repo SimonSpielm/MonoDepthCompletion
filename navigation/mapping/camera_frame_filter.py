@@ -1,7 +1,7 @@
 """
 Step 4: Camera frame filter (former Azure Kinect interface, processing part).
 
-Subscribes the completed camera frame of moge_depth_completion.py (or, with
+Subscribes the completed camera frame of depth_completion/depth_completion_node.py (or, with
 --depth_source raw / --raw, the raw frame of ln_ros_camera_bridge.py), filters it
 and publishes:
 

@@ -1,7 +1,7 @@
 # Offline-Benchmark für die Tiefenvervollständigung
 
-Testet **genau den Produktionscode** (`navigation/mapping/depth_fusion.py` und `depth_models.py`, die auch der
-ROS-Knoten `moge_depth_completion.py` importiert) ohne ROS, Kamera oder Roboter, auf einem
+Testet **genau den Produktionscode** (`../depth_fusion.py` und `../depth_models.py`, die auch der
+ROS-Knoten `depth_completion_node.py` importiert) ohne ROS, Kamera oder Roboter, auf einem
 Laptop. Damit lassen sich Parameter und Code-Änderungen deterministisch vergleichen, bevor
 sie auf den Roboter gehen.
 

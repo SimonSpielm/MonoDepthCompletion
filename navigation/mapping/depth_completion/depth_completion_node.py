@@ -1,42 +1,44 @@
 #!/usr/bin/env python3
 r"""
-Step 3: MoGe-2 mono depth completion (ROS 2, GPU, no visualisation).
+Step 3: depth completion with a monocular model (ROS 2, GPU, no visualisation).
 
 Fills the holes of the sensor depth and publishes the completed depth together with the
-matching RGB image and camera_info, all with the ORIGINAL header (stamp = LN capture
-timestamp, frame_id = camera):
+matching RGB image and camera_info, all with the ORIGINAL header (stamp = LN capture time,
+frame_id = camera):
 
-    /camera/depth/image_raw   (trigger)  --\                    /camera/completed/depth/image_raw (16UC1, mm)
-    /camera/color/image_raw   (MoGe input) >-- MoGe + Fusion -->  /camera/completed/color/image_raw
-    /camera/color/camera_info (FoV, static)/                     /camera/completed/camera_info
+    /camera/depth/image_raw   (trigger)     --\                       /camera/completed/depth/image_raw (16UC1, mm)
+    /camera/color/image_raw   (model input)  >-- model + fusion -->  /camera/completed/color/image_raw
+    /camera/color/camera_info (FoV, static) --/                       /camera/completed/camera_info
 
-The depth image is the only trigger, there is no message_filters synchronizer.
-MoGe predicts depth FROM the RGB image, so RGB is still needed as input: it is kept
-in a small buffer and looked up by the stamp of the depth image (the bridge stamps
-both with the same LN capture time). A lost RGB message therefore only costs that
-one frame and never stalls the stream. The RGB image that was used for a frame is
-re-published next to its completed depth, so downstream nodes (filter, nvblox colouring)
-get color, depth and camera_info with one identical stamp and need no pairing of their own.
+The depth image is the only trigger, there is no message_filters synchronizer. The model
+estimates depth FROM the RGB image, so RGB is still needed as input: it is kept in a small
+buffer and looked up by the stamp of the depth image (the bridge stamps both with the same LN
+capture time). A lost RGB message therefore only costs that one frame and never stalls the
+stream. The RGB image used for a frame is re-published next to its completed depth, so
+downstream nodes (filter, nvblox colouring) get color, depth and camera_info with one identical
+stamp and need no pairing of their own.
 
-1. MoGe-2 schätzt metrische Tiefe (mit echter Brennweite aus camera_info).
-2. Globaler Faktor: Median(Messung / MoGe), über die Zeit geglättet.
-3. Gradienten-Fusion: Korrekturfeld c (log D = log M + c), das die Messungen trifft, entlang
-   von Oberflächen glatt ist (MoGe gibt die Form vor), nicht über Kanten wirkt und hinter dem
-   Messbereich auf 0 abklingt. Gelöst per vorkonditioniertem CG auf der GPU.
-   Gemessene Pixel bleiben unverändert.
-4. Kantenfilter gegen schwebende Punkte (depth_fusion.fill): gefüllte Pixel auf der verschmierten
-   Kante des Modells (zu steil für eine echte Fläche) und Pixel in der Zone um echte Tiefenkanten,
-   die weder zur Vorder- noch zur Hinterseite passen, werden verworfen.
+Pipeline (details in README.md and depth_fusion.py):
+1. The model (MODEL, see depth_models.py) predicts metric depth, using the real focal length
+   from camera_info.
+2. Global scale: median(measurement / model), smoothed over time.
+3. Gradient fusion: correction field c (log D = log M + c) that matches the measurements, is
+   smooth along surfaces (the model provides the shape), does not act across edges and decays
+   to 0 behind the measured range. Solved with preconditioned CG on the GPU. Measured pixels
+   are never changed.
+4. Edge filters against floating points: filled pixels on the model's smeared edge (too steep
+   for a real surface) and pixels in the zone around real depth edges that match neither the
+   near nor the far side are discarded.
 
-MoGe is slower than the camera: only the newest frame is processed, older ones are dropped.
+The model is slower than the camera: only the newest frame is processed, older ones are dropped.
 
-Usage (conda env with torch + MoGe, ROS sourced):
-    python moge_depth_completion.py
+Usage (conda env with torch and the model package, ROS sourced):
+    python navigation/mapping/depth_completion/depth_completion_node.py
 """
 import os
 import sys
 
-sys.path = [p for p in sys.path if "conan_cache" not in p]          # altes Conan-numpy raus
+sys.path = [p for p in sys.path if "conan_cache" not in p]          # drop the old Conan numpy
 _ROS = "/opt/ros/jazzy/lib/python3.12/site-packages"
 if os.path.isdir(_ROS) and _ROS not in sys.path:
     sys.path.append(_ROS)
@@ -55,9 +57,9 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
-# Modell (depth_models.MODELS) / Auflösung. Gemessen auf M4 Pro (MPS), 1280x720, inkl. Fusion
-# (bench/speed.py), Fehler <3 m in großen Löchern (bench/depth_bench.py --hold-px 128):
-#   moge2-s  600:  85 ms, 3.8 %  | moge2-b  600: 107 ms, 3.1 %  <- 8 Hz-Ziel
+# Model (depth_models.MODELS) / resolution. Measured on M4 Pro (MPS), 1280x720, incl. fusion
+# (bench/speed.py), error < 3 m in large holes (bench/depth_bench.py --hold-px 128):
+#   moge2-s  600:  85 ms, 3.8 %  | moge2-b  600: 107 ms, 3.1 %  <- 8 Hz target
 #   moge2-b 1200: 182 ms, 2.8 %  | moge    1200: 306 ms, 1.9 %  | depthpro2-l: 1029 ms, 1.6 %
 MODEL = "moge2-b"
 NUM_TOKENS = 600
@@ -67,10 +69,10 @@ INFO_TOPIC = "/camera/color/camera_info"
 OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
 OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
 OUT_INFO_TOPIC = "/camera/completed/camera_info"
-RGB_BUFFER = 10        # zuletzt empfangene RGB-Bilder, nach Zeitstempel abrufbar (~0.7 s bei 15 Hz)
+RGB_BUFFER = 10        # last received RGB images, looked up by stamp (~0.7 s at 15 Hz)
 
 
-# Algorithmus (ROS-frei, auch vom Offline-Benchmark genutzt)
+# algorithm (ROS-free, also used by the offline benchmark)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from depth_fusion import GradientFusion, fill  # noqa: E402
 from depth_models import load_model  # noqa: E402
@@ -107,14 +109,14 @@ def stamp_key(stamp):
     return (stamp.sec, stamp.nanosec)
 
 
-class MoGeDepthCompletion(Node):
+class DepthCompletion(Node):
     def __init__(self):
-        super().__init__("moge_depth_completion")
+        super().__init__("depth_completion")
         self.lock = threading.Lock()
         self.new_frame = threading.Event()
-        self.latest_depth = None             # neueste, noch nicht verarbeitete Tiefe (Trigger)
-        self.rgb_buffer = OrderedDict()      # stamp -> RGB-Nachricht
-        self.info_msg = None                 # statisch, nur für die Brennweite
+        self.latest_depth = None             # newest depth not yet processed (trigger)
+        self.rgb_buffer = OrderedDict()      # stamp -> RGB message
+        self.info_msg = None                 # static, only for the focal length
         self._n_depth = 0
 
         self.create_subscription(Image, DEPTH_TOPIC, self.depth_cb, qos_profile_sensor_data)
@@ -133,11 +135,11 @@ class MoGeDepthCompletion(Node):
             self.rgb_buffer[stamp_key(msg.header.stamp)] = msg
             while len(self.rgb_buffer) > RGB_BUFFER:
                 self.rgb_buffer.popitem(last=False)
-        self.new_frame.set()     # die passende Tiefe kann schon warten
+        self.new_frame.set()     # the matching depth may already be waiting
 
     def depth_cb(self, msg):
         with self.lock:
-            self.latest_depth = msg          # ältere, noch nicht verarbeitete Tiefe verwerfen
+            self.latest_depth = msg          # drop the older, unprocessed depth
             self._n_depth += 1
         self.new_frame.set()
 
@@ -147,10 +149,10 @@ class MoGeDepthCompletion(Node):
         return n
 
     def take(self, timeout=0.5):
-        """Neueste Tiefe + RGB mit identischem Zeitstempel, sonst None.
+        """Newest depth + the RGB image with the identical stamp, otherwise None.
 
-        Fehlt das RGB-Bild noch (Reihenfolge der Ankunft), bleibt die Tiefe liegen, bis es
-        kommt oder eine neuere Tiefe sie ersetzt.
+        If the RGB image has not arrived yet (order of arrival), the depth is kept until it
+        arrives or a newer depth replaces it.
         """
         if not self.new_frame.wait(timeout):
             return None
@@ -166,14 +168,15 @@ class MoGeDepthCompletion(Node):
         return rgb, depth
 
     def publish(self, color_msg, depth_mm, info_msg, header):
-        # Color is the exact RGB image MoGe used (same stamp); camera_info gets that stamp too
+        # color = exactly the RGB image the depth was estimated from (same stamp);
+        # camera_info gets the same stamp
         info_msg.header.stamp = header.stamp
         self.pub_color.publish(color_msg)
         self.pub_depth.publish(depth_to_msg(depth_mm, header))
         self.pub_info.publish(info_msg)
 
 
-# ---------------------------------------------------------------- Hauptschleife
+# ---------------------------------------------------------------- main loop
 
 def main():
     print(f"Lade {MODEL} ({NUM_TOKENS} Tokens) ...")
@@ -181,7 +184,7 @@ def main():
     if moge.dev.type == "cpu":
         print("WARNUNG: keine GPU, Modell und Fusion laufen auf der CPU (sehr langsam).")
     rclpy.init()
-    node = MoGeDepthCompletion()
+    node = DepthCompletion()
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
 
     fusion = GradientFusion()
@@ -198,7 +201,7 @@ def main():
         while rclpy.ok():
             frame = node.take()
             info_msg = node.info_msg
-            if frame is None or info_msg is None:   # noch kein Paar / noch keine camera_info
+            if frame is None or info_msg is None:   # no pair / no camera_info yet
                 continue
             color_msg, depth_msg = frame
             t = time.perf_counter()
@@ -216,7 +219,7 @@ def main():
                 torch.mps.synchronize()
             t = tick("MoGe", t)
 
-            # Kantenfilter (Rampen, Stützprüfung) mit den Standardwerten aus depth_fusion.fill
+            # edge filters (ramp, support check) with the defaults of depth_fusion.fill
             f_px = float(info_msg.k[0]) * W / info_msg.width
             filled, log_s = fill(torch.from_numpy(depth).to(pred.device), pred, fusion, log_s,
                                  f_px=f_px)
@@ -229,7 +232,7 @@ def main():
 
             n_sum += 1
             now = time.perf_counter()
-            if now - last >= 2.0:   # Mittelwerte der letzten ~2 s in die Konsole
+            if now - last >= 2.0:   # averages of the last ~2 s to the console
                 dt = now - last
                 a = {k: v / max(n_sum, 1) for k, v in t_sum.items()}
                 print(f"Tiefe in {node.take_depth_count() / dt:5.1f} Hz | verarb. {n_sum / dt:5.1f} Hz "

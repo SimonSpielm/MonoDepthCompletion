@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Laufzeit der ganzen Tiefenvervollständigung pro Frame: Modell + fill (Fusion und Filter),
-auf demselben Gerät wie im ROS-Knoten. Ein Frame aus einer frames.npz, Median über --reps.
+Runtime of the whole depth completion per frame: model + fill (fusion and filters), on the
+same device as the ROS node. One frame of a frames.npz, median over --reps.
 
     python speed.py --frames f.npz --models moge2-s:600 moge2-b:1200 depthpro2-s
     python speed.py --frames f.npz --fill-only --set down=2
 
-Modell:num_tokens gilt für MoGe; Depth Pro 2 rechnet immer in voller Auflösung.
+model:num_tokens applies to MoGe; Depth Pro 2 always runs at full resolution.
 """
 import argparse
 import math
@@ -23,7 +23,7 @@ from depth_bench import FILL_KEYS, FUSION_KEYS, parse_kv  # noqa: E402
 from depth_fusion import GradientFusion, fill  # noqa: E402
 from depth_models import load_model  # noqa: E402
 
-PROD = {}   # Standardwerte aus depth_fusion.py (= Produktion), --set überschreibt
+PROD = {}   # defaults of depth_fusion.py (= production), --set overrides
 
 
 def sync(dev):
@@ -50,10 +50,10 @@ def main():
     ap.add_argument("--frames", required=True)
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--models", nargs="*", default=["moge2-s:1200", "depthpro2-s"])
-    ap.add_argument("--device", default=None, help="Standard: cuda, sonst mps, sonst cpu")
+    ap.add_argument("--device", default=None, help="default: cuda, else mps, else cpu")
     ap.add_argument("--reps", type=int, default=5)
-    ap.add_argument("--set", nargs="*", help="fill/Fusion-Parameter, überschreibt PROD")
-    ap.add_argument("--fill-only", action="store_true", help="nur fill mit gecachter Vorhersage")
+    ap.add_argument("--set", nargs="*", help="fill/fusion parameters, override PROD")
+    ap.add_argument("--fill-only", action="store_true", help="fill only, with a dummy prediction")
     a = ap.parse_args()
 
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else

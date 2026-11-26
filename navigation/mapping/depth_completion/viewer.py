@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Live-Viewer für die Tiefenvervollständigung (ROS 2): RGB | Sensortiefe | gefüllte Tiefe.
+Live viewer for the depth completion (ROS 2): RGB | sensor depth | completed depth.
 
-Rechnet genau den Code des ROS-Knotens (depth_models.py + depth_fusion.fill), nur mit Anzeige
-statt Publish. Zum Ausprobieren von Modellen und Parametern an der laufenden Kamera.
+Runs exactly the code of the ROS node (depth_models.py + depth_fusion.fill), only with a
+display instead of publishing. Meant for trying models and parameters on the live camera.
 
-    python navigation/mapping/dev/depth_viewer.py                          # moge2-b, 600 Tokens
-    python navigation/mapping/dev/depth_viewer.py --model moge --num-tokens 1200
-    python navigation/mapping/dev/depth_viewer.py --model depthpro2-s --stream
-    python navigation/mapping/dev/depth_viewer.py --set ramp_dmin=0 support_px=0  # Filter aus
+    python navigation/mapping/depth_completion/viewer.py                          # moge2-b, 600 tokens
+    python navigation/mapping/depth_completion/viewer.py --model moge --num-tokens 1200
+    python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --stream
+    python navigation/mapping/depth_completion/viewer.py --set ramp_dmin=0 support_px=0  # filters off
 
-Modelle: siehe depth_models.MODELS. --stream nur Depth Pro 2 (zeitlich stabiler).
---set: Parameter von depth_fusion.fill / GradientFusion, z. B. down=4 support_px=8.
+Models: see depth_models.MODELS. --stream only for Depth Pro 2 (temporally more stable).
+--set: parameters of depth_fusion.fill / GradientFusion, e.g. down=4 support_px=8.
 
-Anzeige gefüllt: weiße Kontur = gefüllte Bereiche, magenta = vom Kantenfilter verworfen.
-Konsole alle 2 s: Rate, Zeiten und (Taste e) der Fehler unter 3 m. Dafür werden zufällige
-32-px-Blöcke gemessener Pixel ausgeblendet, gefüllt und mit der Messung verglichen; das
-kostet eine zweite Füllung pro Frame.
+Completed panel: white contour = filled regions, magenta = discarded by the edge filters.
+Console every 2 s: rate, timings and (key e) the error below 3 m. For that, random 32 px blocks
+of measured pixels are hidden, filled and compared with the measurement; this costs a second
+fill per frame.
 
-Tasten: q = beenden, e = Fehlerauswertung an/aus.
+Keys: q = quit, e = error evaluation on/off.
 """
 import argparse
 import math
@@ -36,7 +36,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from depth_fusion import GradientFusion, fill  # noqa: E402
 from depth_models import MODELS, load_model  # noqa: E402
 
@@ -61,10 +61,10 @@ def to_depth(msg):
 
 
 class Listener(Node):
-    """Neuestes RGB/Tiefe-Paar und die letzte camera_info."""
+    """Newest RGB/depth pair and the latest camera_info."""
 
     def __init__(self, a):
-        super().__init__("depth_viewer")
+        super().__init__("depth_completion_viewer")
         self.lock, self.latest, self.info = threading.Lock(), None, None
         subs = [Subscriber(self, Image, a.color, qos_profile=qos_profile_sensor_data),
                 Subscriber(self, Image, a.depth, qos_profile=qos_profile_sensor_data)]
@@ -96,7 +96,7 @@ def label(img, s):
 
 
 def holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, f_px, rng):
-    """AbsRel [%] und MAE [cm] unter NEAR_M auf ausgeblendeten 32-px-Blöcken, sonst None."""
+    """AbsRel [%] and MAE [cm] below NEAR_M on hidden 32 px blocks, otherwise None."""
     H, W = depth.shape
     pick = rng.random((-(-H // 32), -(-W // 32))) < 0.15
     blocks = np.kron(pick, np.ones((32, 32), bool))[:H, :W] & (depth > 0)
@@ -113,20 +113,20 @@ def holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, f_px, rng):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="moge2-b", choices=MODELS)
-    ap.add_argument("--num-tokens", type=int, default=600, help="nur MoGe")
-    ap.add_argument("--stream", action="store_true", help="nur Depth Pro 2: Live-Stream-Modus")
-    ap.add_argument("--set", nargs="*", default=[], help="Parameter, z. B. ramp_dmin=0 down=4")
+    ap.add_argument("--num-tokens", type=int, default=600, help="MoGe only")
+    ap.add_argument("--stream", action="store_true", help="Depth Pro 2 only: live stream mode")
+    ap.add_argument("--set", nargs="*", default=[], help="parameters, e.g. ramp_dmin=0 down=4")
     ap.add_argument("--color", default="/camera/color/image_raw")
     ap.add_argument("--depth", default="/camera/depth/image_raw")
     ap.add_argument("--info", default="/camera/color/camera_info")
-    ap.add_argument("--width", type=int, default=640, help="Breite je Panel")
+    ap.add_argument("--width", type=int, default=640, help="width per panel")
     a = ap.parse_args()
 
     params = {k: float(v) for k, v in (kv.split("=", 1) for kv in a.set)}
     fusion_kw = {k: (int(v) if k in ("down", "iters") else v) for k, v in params.items() if k in FUSION_KEYS}
     fill_kw = {k: (int(v) if k == "support_px" else v) for k, v in params.items() if k not in FUSION_KEYS}
 
-    print(f"Lade {a.model} ...")
+    print(f"Loading {a.model} ...")
     model = load_model(a.model, a.num_tokens, stream=a.stream)
     dev = model.dev
     rclpy.init()
@@ -135,7 +135,7 @@ def main():
 
     fusion, log_s, rng = GradientFusion(**fusion_kw), None, np.random.default_rng(0)
     evaluate, err = True, None
-    t_sum, n, last = {"Modell": 0.0, "Fuellung": 0.0, "Auswertung": 0.0}, 0, time.perf_counter()
+    t_sum, n, last = {"model": 0.0, "fill": 0.0, "eval": 0.0}, 0, time.perf_counter()
 
     def sync():
         if dev.type == "cuda":
@@ -173,7 +173,7 @@ def main():
                 t_sum[k] += 1000 * dt
             n += 1
 
-            # Anzeige
+            # display
             valid = depth > 0
             dropped = ~valid & (filled <= 0) & torch.isfinite(pred).cpu().numpy()
             lo = float(np.percentile(depth[valid], 2)) if valid.any() else 0.0
@@ -187,8 +187,8 @@ def main():
             panels = [cv2.resize(p, (a.width, h), interpolation=cv2.INTER_NEAREST)
                       for p in (rgb[..., ::-1], colorize(depth, lo, hi), p_fill)]
             label(panels[0], f"RGB  {a.model}")
-            label(panels[1], f"Sensor  {lo:.1f}-{hi:.1f} m, Loecher {100 * (~valid).mean():.0f} %")
-            label(panels[2], f"gefuellt  s={math.exp(log_s):.2f}"
+            label(panels[1], f"sensor  {lo:.1f}-{hi:.1f} m, holes {100 * (~valid).mean():.0f} %")
+            label(panels[2], f"completed  s={math.exp(log_s):.2f}"
                   + (f"  <3m {err[0]:.1f} % / {err[1]:.1f} cm" if evaluate and err else ""))
             cv2.imshow("depth viewer", np.hstack(panels))
             key = cv2.waitKey(1) & 0xFF
@@ -202,7 +202,7 @@ def main():
                 avg = {k: v / n for k, v in t_sum.items()}
                 print(f"{n / (now - last):5.1f} Hz | "
                       + " | ".join(f"{k} {v:.0f} ms" for k, v in avg.items())
-                      + (f" | Fehler <3 m: {err[0]:.2f} % / {err[1]:.1f} cm" if evaluate and err else ""),
+                      + (f" | error <3 m: {err[0]:.2f} % / {err[1]:.1f} cm" if evaluate and err else ""),
                       flush=True)
                 t_sum, n, last = dict.fromkeys(t_sum, 0.0), 0, now
     finally:

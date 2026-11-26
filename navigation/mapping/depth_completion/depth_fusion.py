@@ -1,21 +1,21 @@
 """
-Tiefenvervollständigung ohne ROS: Sensortiefe mit Löchern + Vorhersage eines monokularen Modells
-(depth_models.py) -> gefüllte Tiefe. Einstieg ist fill().
+Depth completion without ROS: sensor depth with holes + prediction of a monocular model
+(depth_models.py) -> completed depth. Entry point is fill(). See README.md.
 
-  1. Globaler Faktor: Median(Messung / Vorhersage), über die Zeit geglättet (ema).
-  2. Gradienten-Fusion: Korrekturfeld c mit log D = log M + c, das die Messungen trifft, entlang
-     von Oberflächen glatt ist (das Modell gibt die Form vor), nicht über Kanten wirkt und weit
-     hinter dem Messbereich auf 0 abklingt. Vorkonditioniertes CG auf der GPU.
-  3. Kantenfilter gegen schwebende Punkte. Das Modell zeichnet Tiefensprünge als weiche Rampe;
-     genau dort misst der Sensor oft nichts, die Rampe würde als Punkte zwischen Vorder- und
-     Hintergrund in der Karte landen. Verworfen werden gefüllte Pixel, die
-       a) auf der Rampe selbst liegen: zu steil für eine echte Fläche (ramp_mask), oder
-       b) in der Zone um eine gemessene Tiefenkante weder zur Vorder- noch zur Hinterseite
-          passen (supported).
-     Gemessene Pixel bleiben immer unverändert. Ein Loch ist harmlos, ein Punkt in der Luft nicht.
+  1. Global scale: median(measurement / prediction), smoothed over time (ema).
+  2. Gradient fusion: correction field c with log D = log M + c that matches the measurements,
+     is smooth along surfaces (the model provides the shape), does not act across edges and
+     decays to 0 far behind the measured range. Preconditioned CG on the GPU.
+  3. Edge filters against floating points. The model draws depth discontinuities as a soft
+     ramp; exactly there the sensor often measures nothing, so the ramp would end up as points
+     between foreground and background in the map. Filled pixels are discarded if they
+       a) lie on the ramp itself: too steep for a real surface (ramp_mask), or
+       b) lie in the zone around a measured depth edge and match neither the near nor the far
+          side (supported).
+     Measured pixels are never changed. A hole is harmless, a point in mid-air is not.
 
-Genutzt vom ROS-Knoten (moge_depth_completion.py), vom Viewer (dev/depth_viewer.py) und vom
-Offline-Benchmark (bench/), die damit immer denselben Code rechnen.
+Used by the ROS node (depth_completion_node.py), the viewer (viewer.py) and the
+offline benchmark (bench/), so all of them always run the same code.
 """
 import math
 
@@ -23,10 +23,10 @@ import torch
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------- Gradienten-Fusion (GPU)
+# ---------------------------------------------------------------- gradient fusion (GPU)
 
 def _block_stats(z, m, f):
-    """Maskierter Mittelwert, Varianz und Abdeckung je f×f-Block (avg_pool = cv2 INTER_AREA)."""
+    """Masked mean, variance and coverage per f×f block (avg_pool = cv2 INTER_AREA)."""
     H, W = z.shape
     h, w = H // f, W // f
     m = m[: h * f, : w * f].float()
@@ -41,7 +41,27 @@ def _block_stats(z, m, f):
 
 
 class GradientFusion:
-    """Eingaben und Ausgabe sind torch-Tensoren (float32, gleiches Gerät)."""
+    """Local correction of the model depth M towards the measurement Z, in log depth:
+    log D = log M + c.
+
+    The correction field c has to satisfy three things at once (least squares):
+      1. Data:       c ≈ r = log Z - log M where a measurement exists (weight wm).
+      2. Smoothness: c barely changes between neighbours (weight lam), except across edges of
+                     the model depth, where the coupling exp(-|Δ log M| / sigma_edge) becomes
+                     weak. The shape comes from the model, only scale and offset from the sensor.
+      3. Decay:      c is pulled slightly towards 0 (mu_near), more strongly behind the measured
+                     range (mu_far, transition over far_band in log depth). Without nearby
+                     measurements the model depth with the global scale remains.
+    Minimised is  Σ wm·(c - r)² + Σ w_neighbour·(c_i - c_j)² + Σ mu·c²,  a linear system with a
+    sparse symmetric matrix. It is solved on a grid downsampled by `down` with preconditioned CG
+    (iters iterations, warm start from the previous frame), then a second time with Huber weights
+    against outliers (outlier, in log units). Finally c is brought back to full resolution in an
+    edge-preserving way (_guided_upsample).
+
+    Measurement weight wm per grid cell: coverage with measurements, sensor accuracy ~ 1/z²
+    (falling off beyond z_ref), less weight for spread inside the cell (edges), outliers w.r.t.
+    the median. Inputs and output are torch tensors (float32, same device).
+    """
 
     def __init__(self, down=2, lam=1.0, mu_near=1e-4, mu_far=0.005, far_band=0.15,
                  sigma_edge=0.05, z_ref=4.0, outlier=1.0, iters=40, tol=1e-4):
@@ -49,11 +69,12 @@ class GradientFusion:
         self.mu_near, self.mu_far, self.far_band = mu_near, mu_far, far_band
         self.sigma_edge, self.z_ref, self.outlier = sigma_edge, z_ref, outlier
         self.iters, self.tol = iters, tol
-        self._c_prev = None      # Warmstart mit dem Korrekturfeld des letzten Frames
+        self._c_prev = None      # warm start with the correction field of the previous frame
         self._up_cache = None
 
     @staticmethod
     def _apply(c, diag, wx, wy):
+        """Matrix-vector product of the system: (wm + mu + degree)·c - Σ neighbour weight·c_neighbour."""
         out = diag * c
         out[:, :-1] -= wx * c[:, 1:]
         out[:, 1:] -= wx * c[:, :-1]
@@ -62,6 +83,7 @@ class GradientFusion:
         return out
 
     def _cg(self, b, diag, wx, wy, x):
+        """Conjugate gradients with Jacobi (diagonal) preconditioning, starting at x."""
         r = b - self._apply(x, diag, wx, wy)
         z = r / diag
         p = z.clone()
@@ -72,7 +94,7 @@ class GradientFusion:
             alpha = rz / torch.clamp((p * Ap).sum(), min=1e-30)
             x = x + alpha * p
             r = r - alpha * Ap
-            # Abbruchtest nur alle 10 Iterationen: jeder Test erzwingt eine GPU-Synchronisation
+            # convergence test only every 10 iterations: each test forces a GPU synchronisation
             if i % 10 == 9 and bool(torch.sqrt((r * r).sum()) < self.tol * bn):
                 break
             z = r / diag
@@ -95,7 +117,7 @@ class GradientFusion:
         r, rvar, frac = _block_stats(r_full, both, f)
         zlog, _, _ = _block_stats(logZ, both, f)
 
-        # Messgewichte: Abdeckung, Sensorgenauigkeit ~1/z², Kanten/Streuung, Ausreißer
+        # measurement weights: coverage, sensor accuracy ~1/z², edges/spread, outliers
         wm = frac * torch.clamp(torch.exp(2 * (math.log(self.z_ref) - zlog)), max=1.0)
         wm = wm * torch.exp(-(torch.sqrt(gMvar) + torch.sqrt(rvar)) / self.sigma_edge)
         wm = torch.where(frac < 0.2, torch.zeros_like(wm), wm)
@@ -107,9 +129,9 @@ class GradientFusion:
             t = torch.clamp((gM - torch.quantile(zh, 0.98)) / self.far_band, 0, 1)
         else:
             t = torch.ones_like(gM)
-        mu = self.mu_near + (self.mu_far - self.mu_near) * t   # Abklingen hinter Messbereich
+        mu = self.mu_near + (self.mu_far - self.mu_near) * t   # decay behind the measured range
 
-        # kantenbewusste Glattheit
+        # edge-aware smoothness
         ok = gMfrac > 0.5
         wx = self.lam * torch.exp(-torch.abs(torch.diff(gM, dim=1)) / self.sigma_edge) \
             * (ok[:, 1:] & ok[:, :-1])
@@ -128,13 +150,13 @@ class GradientFusion:
         x = self._cg(wm2 * r, wm2 + mu + deg, wx, wy, x)
         self._c_prev = x
 
-        # Kantentreu direkt auf volle Auflösung: ein zusätzlicher bilinearer Schritt
-        # (halbe -> volle Auflösung) würde c über Objektkanten verschmieren.
+        # edge-preserving, directly to full resolution: an extra bilinear step
+        # (half -> full resolution) would smear c across object edges.
         c_full = self._guided_upsample(x, gM, logM, H, W)
         return torch.where(pv, est * torch.exp(c_full), zero)
 
     def _guided_upsample(self, c, gM, logM, H, W):
-        """Bilinear, Gitterpunkte mit ähnlicher MoGe-Tiefe zählen mehr (kantentreu)."""
+        """Bilinear upsampling where grid points with similar model depth count more (edge-preserving)."""
         h, w = c.shape
         key = (h, w, H, W, str(c.device))
         if self._up_cache is None or self._up_cache[0] != key:
@@ -162,24 +184,25 @@ class GradientFusion:
 @torch.inference_mode()
 def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, f_px=None,
          ramp_dmin=0.5, support_px=12, support_rtol=0.02, support_edge=0.1):
-    """Füllt die Löcher von depth_m. Gibt (gefüllt [m], log_s) zurück; 0 = leer.
+    """Fills the holes of depth_m. Returns (completed [m], log_s); 0 = empty.
 
-    depth_m: Sensortiefe [m], 0 = Loch. pred: Modelltiefe [m], inf = ungültig. Beides
-    torch-Tensoren (H, W) auf demselben Gerät. prev_log_s: Faktor des letzten Frames (log).
-    f_px: Brennweite [px] für den Rampenfilter (ohne f_px ist er aus).
+    depth_m: sensor depth [m], 0 = hole. pred: model depth [m], inf = invalid. Both torch
+    tensors (H, W) on the same device. prev_log_s: global scale of the previous frame (log).
+    f_px: focal length [px] for the ramp filter (without f_px it is off).
 
-    Kantenfilter (Ablauf: Kante finden -> Zone um die Kante -> dort prüfen):
-      ramp_dmin   [m]  Schritt 1, ramp_mask: verschmierte Kante des Modells verwerfen. 0 = aus.
-                       Muss unter der Kamerahöhe liegen (Boden: Abstand = Kamerahöhe ≈ 0,58 m).
-      support_px  [px] Schritt 2, supported: Umkreis, in dem nach echten Messungen geschaut
-                       wird (= Breite der Zone um Tiefenkanten). 0 = aus.
-      support_edge     Zone liegt vor, wenn die Messungen im Umkreis um mehr als 10 % streuen.
-      support_rtol     erlaubte Abweichung zur Vorder- bzw. Hinterseite (2 %).
+    Edge filters (find the edge -> zone around the edge -> check there):
+      ramp_dmin   [m]  step 1, ramp_mask: discard the model's smeared edge. 0 = off.
+                       Must stay below the camera height (floor: distance = camera height
+                       ≈ 0.58 m).
+      support_px  [px] step 2, supported: radius in which real measurements are looked up
+                       (= width of the zone around depth edges). 0 = off.
+      support_edge     a zone exists where the measurements in the radius spread by > 10 %.
+      support_rtol     allowed deviation from the near or far side (2 %).
     """
     valid = depth_m > 0
     pvalid = torch.isfinite(pred) & (pred > 0)
 
-    # 1. globaler Faktor (robust: Median, jedes 4. Pixel genügt)
+    # 1. global scale (robust median, every 4th pixel is enough)
     sub = (valid & pvalid)[::4, ::4]
     log_s = prev_log_s if prev_log_s is not None else 0.0
     if int(sub.sum()) > 200:
@@ -189,10 +212,10 @@ def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, f_px=None,
         log_s = cur if prev_log_s is None else (1 - ema) * prev_log_s + ema * cur
     est = torch.where(pvalid, pred * math.exp(log_s), torch.zeros_like(pred))
 
-    # 2. lokale Korrektur
+    # 2. local correction
     est = fusion(depth_m, est)
 
-    # 3. Kantenfilter: nur gefüllte Pixel werden verworfen, Messungen bleiben
+    # 3. edge filters: only filled pixels are discarded, measurements stay
     keep = est > 0
     if ramp_dmin > 0 and f_px:
         keep &= ~ramp_mask(est, f_px, ramp_dmin)
@@ -203,15 +226,15 @@ def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, f_px=None,
 
 
 def ramp_mask(est, f_px, dmin, s=2):
-    """Schritt 1: Pixel auf der verschmierten Kante des Modells ("zu steil, um echt zu sein").
+    """Step 1: pixels on the model's smeared edge ("too steep to be real").
 
-    Das Modell zeichnet einen Sprung von 1,5 m auf 3 m als Rampe 1,6 -> 1,9 -> 2,4 -> 2,8 m.
-    So steil kann eine echte Fläche im Bild nur sein, wenn man fast genau an ihr entlang
-    schaut. Formal: Für eine Ebene im Abstand d vom Kamerazentrum gilt f·|∇(1/z)| ≤ 1/d. Eine
-    Rampe läuft verlängert fast durch die Kamera (d ≈ 0), echte Flächen nicht: Der Boden hat in
-    jeder Entfernung d = Kamerahöhe. Ist f·|∇(1/z)| > 1/dmin, wird das Pixel verworfen.
-    Die Breite der Maske passt sich so von selbst an die Breite der Rampe an.
-    Gradient als zentrale Differenz über ±s Pixel; Paare mit ungültigem Nachbarn zählen nicht.
+    The model draws a jump from 1.5 m to 3 m as a ramp 1.6 -> 1.9 -> 2.4 -> 2.8 m. A real surface
+    can only look that steep in the image if one looks almost exactly along it. Formally: for a
+    plane at distance d from the camera centre, f·|∇(1/z)| ≤ 1/d. Extended, a ramp passes almost
+    through the camera (d ≈ 0), real surfaces do not: the floor has d = camera height at any
+    range. Pixels with f·|∇(1/z)| > 1/dmin are discarded, so the mask automatically adapts to
+    the width of the ramp. Gradient as central difference over ±s pixels; pairs with an invalid
+    neighbour do not count.
     """
     v = est > 0
     q = torch.where(v, 1.0 / torch.where(v, est, torch.ones_like(est)), torch.zeros_like(est))
@@ -224,21 +247,21 @@ def ramp_mask(est, f_px, dmin, s=2):
 
 
 def supported(est, depth_m, r, rtol, edge):
-    """Schritt 2: passt der Füllwert zu den echten Messungen im Umkreis r?
+    """Step 2: does the filled value match the real measurements within radius r?
 
-    Im (2r+1)²-Fenster werden kleinste (dmin) und größte (dmax) Messung bestimmt.
-      - keine Messung im Fenster (Inneres großer Löcher): bleibt.
-      - Messungen ähnlich (dmax ≤ dmin·(1+edge)), glatte Fläche: est muss in
-        [dmin·(1-rtol), dmax·(1+rtol)] liegen.
-      - Messungen streuen stark: Pixel liegt in der Zone um eine Tiefenkante (Kante um r px
-        "aufgebläht"). est muss auf ±rtol zur Vorderseite (dmin) ODER Hinterseite (dmax) passen,
-        Werte dazwischen wären Punkte in der Luft.
-    Gibt die Maske der Pixel zurück, die bleiben dürfen.
+    The smallest (dmin) and largest (dmax) measurement in the (2r+1)² window are determined.
+      - no measurement in the window (inside large holes): kept.
+      - similar measurements (dmax ≤ dmin·(1+edge)), smooth surface: est must lie in
+        [dmin·(1-rtol), dmax·(1+rtol)].
+      - strongly spread measurements: the pixel is in the zone around a depth edge (the edge
+        "dilated" by r px). est must match the near side (dmin) OR the far side (dmax) within
+        ±rtol; values in between would be points in mid-air.
+    Returns the mask of pixels that may stay.
     """
     v = depth_m > 0
     k = 2 * r + 1
 
-    def mx(a):                                   # separierbares Max-Pooling, k×k
+    def mx(a):                                   # separable k×k max pooling
         a = F.max_pool2d(a[None, None], (1, k), 1, (0, r))
         return F.max_pool2d(a, (k, 1), 1, (r, 0))[0, 0]
 
