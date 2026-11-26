@@ -2,13 +2,19 @@
 r"""
 Step 3: MoGe-2 mono depth completion (ROS 2, GPU, no visualisation).
 
-Subscribes the raw camera topics of ln_ros_camera_bridge.py, fills the holes of the
-sensor depth and republishes color + completed depth + camera_info with the
+Fills the holes of the sensor depth and publishes ONLY the completed depth with the
 ORIGINAL header (stamp = LN capture timestamp, frame_id = camera):
 
-    /camera/color/image_raw    \                     /camera/completed/color/image_raw
-    /camera/depth/image_raw     >-- MoGe + Fusion -->  /camera/completed/depth/image_raw (16UC1, mm)
-    /camera/color/camera_info  /                     /camera/completed/camera_info
+    /camera/depth/image_raw   (trigger)  --\
+    /camera/color/image_raw   (MoGe input) >-- MoGe + Fusion --> /camera/completed/depth/image_raw
+    /camera/color/camera_info (FoV, static)/                     (16UC1, mm)
+
+The depth image is the only trigger, there is no message_filters synchronizer.
+MoGe predicts depth FROM the RGB image, so RGB is still needed as input: it is kept
+in a small buffer and looked up by the stamp of the depth image (the bridge stamps
+both with the same LN capture time). A lost RGB message therefore only costs that
+one frame and never stalls the stream. Color and camera_info are not re-published;
+downstream consumes `/camera/color/*` directly.
 
 1. MoGe-2 schätzt metrische Tiefe (mit echter Brennweite aus camera_info).
 2. Globaler Faktor: Median(Messung / MoGe), über die Zeit geglättet.
@@ -34,13 +40,13 @@ os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 import math
 import threading
 import time
+from collections import OrderedDict
 
 import cv2
 import numpy as np
 import rclpy
 import torch
 import torch.nn.functional as F
-from message_filters import Subscriber, TimeSynchronizer
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
@@ -50,10 +56,8 @@ NUM_TOKENS = 1200
 COLOR_TOPIC = "/camera/color/image_raw"
 DEPTH_TOPIC = "/camera/depth/image_raw"
 INFO_TOPIC = "/camera/color/camera_info"
-OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
 OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
-OUT_INFO_TOPIC = "/camera/completed/camera_info"
-PRINT_EVERY = 30    # alle N Frames Geschwindigkeit + Zeiten in die Konsole
+RGB_BUFFER = 10        # zuletzt empfangene RGB-Bilder, nach Zeitstempel abrufbar (~0.7 s bei 15 Hz)
 
 
 # ---------------------------------------------------------------- Gradienten-Fusion (GPU)
@@ -259,40 +263,68 @@ def depth_to_msg(depth_mm, header):
     return msg
 
 
+def stamp_key(stamp):
+    return (stamp.sec, stamp.nanosec)
+
+
 class MoGeDepthCompletion(Node):
     def __init__(self):
         super().__init__("moge_depth_completion")
-        self.lock, self.latest = threading.Lock(), None
+        self.lock = threading.Lock()
         self.new_frame = threading.Event()
-        # Color, depth and info of one frame carry the identical LN stamp -> exact sync
-        subs = [Subscriber(self, Image, COLOR_TOPIC, qos_profile=qos_profile_sensor_data),
-                Subscriber(self, Image, DEPTH_TOPIC, qos_profile=qos_profile_sensor_data),
-                Subscriber(self, CameraInfo, INFO_TOPIC, qos_profile=qos_profile_sensor_data)]
-        self.sync = TimeSynchronizer(subs, queue_size=5)
-        self.sync.registerCallback(self.cb)
+        self.latest_depth = None             # neueste, noch nicht verarbeitete Tiefe (Trigger)
+        self.rgb_buffer = OrderedDict()      # stamp -> RGB-Nachricht
+        self.info_msg = None                 # statisch, nur für die Brennweite
+        self._n_depth = 0
 
-        self.pub_color = self.create_publisher(Image, OUT_COLOR_TOPIC, 1)
+        self.create_subscription(Image, DEPTH_TOPIC, self.depth_cb, qos_profile_sensor_data)
+        self.create_subscription(Image, COLOR_TOPIC, self.rgb_cb, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, INFO_TOPIC, self.info_cb, qos_profile_sensor_data)
+
         self.pub_depth = self.create_publisher(Image, OUT_DEPTH_TOPIC, 1)
-        self.pub_info = self.create_publisher(CameraInfo, OUT_INFO_TOPIC, 1)
 
-    def cb(self, color, depth, info):
+    def info_cb(self, msg):
+        self.info_msg = msg
+
+    def rgb_cb(self, msg):
         with self.lock:
-            self.latest = (color, depth, info)   # ältere, noch nicht verarbeitete Frames verwerfen
+            self.rgb_buffer[stamp_key(msg.header.stamp)] = msg
+            while len(self.rgb_buffer) > RGB_BUFFER:
+                self.rgb_buffer.popitem(last=False)
+        self.new_frame.set()     # die passende Tiefe kann schon warten
+
+    def depth_cb(self, msg):
+        with self.lock:
+            self.latest_depth = msg          # ältere, noch nicht verarbeitete Tiefe verwerfen
+            self._n_depth += 1
         self.new_frame.set()
 
+    def take_depth_count(self):
+        with self.lock:
+            n, self._n_depth = self._n_depth, 0
+        return n
+
     def take(self, timeout=0.5):
+        """Neueste Tiefe + RGB mit identischem Zeitstempel, sonst None.
+
+        Fehlt das RGB-Bild noch (Reihenfolge der Ankunft), bleibt die Tiefe liegen, bis es
+        kommt oder eine neuere Tiefe sie ersetzt.
+        """
         if not self.new_frame.wait(timeout):
             return None
         with self.lock:
-            m, self.latest = self.latest, None
             self.new_frame.clear()
-        return m
+            depth = self.latest_depth
+            if depth is None:
+                return None
+            rgb = self.rgb_buffer.get(stamp_key(depth.header.stamp))
+            if rgb is None:
+                return None
+            self.latest_depth = None
+        return rgb, depth
 
-    def publish(self, color_msg, depth_mm, info_msg, header):
-        # Color and info are forwarded unchanged; the completed depth gets the original header
-        self.pub_color.publish(color_msg)
+    def publish(self, depth_mm, header):
         self.pub_depth.publish(depth_to_msg(depth_mm, header))
-        self.pub_info.publish(info_msg)
 
 
 # ---------------------------------------------------------------- Hauptschleife
@@ -319,9 +351,10 @@ def main():
     try:
         while rclpy.ok():
             frame = node.take()
-            if frame is None:
+            info_msg = node.info_msg
+            if frame is None or info_msg is None:   # noch kein Paar / noch keine camera_info
                 continue
-            color_msg, depth_msg, info_msg = frame
+            color_msg, depth_msg = frame
             t = time.perf_counter()
             rgb, depth = to_rgb(color_msg), to_depth(depth_msg)
             H, W = rgb.shape[:2]
@@ -340,14 +373,16 @@ def main():
                 .astype(np.uint16)
             t = tick("Fusion", t)
 
-            node.publish(color_msg, depth_mm, info_msg, depth_msg.header)
+            node.publish(depth_mm, depth_msg.header)
             tick("Publish", t)
 
             n_sum += 1
-            if n_sum == PRINT_EVERY:   # Mittelwerte der letzten Frames in die Konsole
-                now = time.perf_counter()
-                a = {k: v / n_sum for k, v in t_sum.items()}
-                print(f"{n_sum / (now - last):5.1f} Hz | s={math.exp(log_s):.2f} | "
+            now = time.perf_counter()
+            if now - last >= 2.0:   # Mittelwerte der letzten ~2 s in die Konsole
+                dt = now - last
+                a = {k: v / max(n_sum, 1) for k, v in t_sum.items()}
+                print(f"Tiefe in {node.take_depth_count() / dt:5.1f} Hz | verarb. {n_sum / dt:5.1f} Hz "
+                      f"| s={math.exp(log_s):.2f} | "
                       + " | ".join(f"{k} {v:.1f}" for k, v in a.items()) + " ms", flush=True)
                 t_sum, n_sum, last = dict.fromkeys(t_sum, 0.0), 0, now
     except KeyboardInterrupt:
