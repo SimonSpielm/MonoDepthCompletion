@@ -21,6 +21,75 @@ Grundregeln:
 | 2 Gradienten-Fusion | passt die Schätzung lokal an die Messungen an, ohne ihre Form zu zerstören | `depth_fusion.GradientFusion` |
 | 3 Kantenfilter | verwirft gefüllte Pixel, die als schwebende Punkte enden würden | `depth_fusion.ramp_mask`, `supported` |
 
+## Installation
+
+Ein conda-Env für Knoten, Viewer und Benchmark mit allen Modellen, für Linux mit NVIDIA-GPU und
+ROS 2 Jazzy.
+
+- Die Python-Version muss zur ROS-Distribution passen (Jazzy: 3.12), sonst lässt sich `rclpy`
+  nicht importieren.
+- numpy muss unter 2 bleiben, weil die ROS-Nachrichtentypen gegen numpy 1.x gebaut sind. MoGe wird
+  deshalb ohne Abhängigkeiten installiert, OpenCV unter 4.12 gehalten.
+
+**1. Env anlegen**
+
+```bash
+conda create -y -n depthcompletion python=3.12
+```
+
+```bash
+conda activate depthcompletion
+```
+
+**2. PyTorch** (CUDA-Version passend zum Treiber wählen, siehe `nvidia-smi` und pytorch.org)
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
+**3. Gemeinsame Pakete**
+
+```bash
+pip install "numpy<2" "opencv-python-headless<4.12" scipy trimesh "huggingface-hub>=1.0" click requests tqdm pillow matplotlib rosbags
+```
+
+**4. MoGe**
+
+```bash
+pip install "numpy<2" "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37" "pipeline @ git+https://github.com/EasternJournalist/pipeline.git@1c511390d90226c00c101f34b84df26a0f8789b4"
+```
+
+```bash
+pip install --no-deps "git+https://github.com/microsoft/MoGe.git@74fbce054ebed49800de42d0ad0e83495065719a"
+```
+
+**5. Depth Pro 2**
+
+```bash
+pip install "numpy<2" "git+https://github.com/apple-aiml-research/ml-depth-pro-2.git@aa389cbb0b74341664ed663a0966c859905cd6c0"
+```
+
+**6. Optional: MoGe-3-Verfeinerung** (nur CUDA, braucht das CUDA-Toolkit; ohne läuft MoGe-3 mit
+seinem Basisnetz)
+
+```bash
+pip install --no-build-isolation "git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf"
+```
+
+**7. Prüfen** (ROS gesourct, im Repo-Hauptordner)
+
+```bash
+python -c "import torch, numpy, rclpy, sensor_msgs.msg; print(torch.cuda.is_available(), numpy.__version__)"
+```
+
+```bash
+python -c "import sys; sys.path.insert(0, 'navigation/mapping/depth_completion'); from depth_models import load_model; print(load_model('moge2-b', 600).dev)"
+```
+
+Die Gewichte werden beim ersten Start geladen (`~/.cache/huggingface`,
+`~/.cache/torch/hub/checkpoints`). Im LN-Prozessmanager das Env-Python direkt eintragen
+(`<conda>/envs/depthcompletion/bin/python`), nicht `conda run`.
+
 ## Beispiel
 
 Eine Aufnahme aus dem Labor (MoGe-2 B, 600 Tokens):
@@ -49,19 +118,18 @@ direkt **metrische** Tiefe in Metern, statt nur relative Tiefe. Wie die Netze in
 funktionieren, spielt hier keine Rolle; wichtig ist nur, dass sie die Form der Szene gut treffen,
 Maßstab und Kanten aber nicht perfekt.
 
-| Name | Modell | Paket | Hz auf M4 Pro* | Fehler < 3 m, große Löcher** | Hinweis |
-|---|---|---|---|---|---|
-| `moge2-s` | MoGe-2 vits-normal | `moge` | 11,8 (600 Tokens) | 3,8 % | am schnellsten |
-| **`moge2-b`** | **MoGe-2 vitb-normal** | `moge` | **9,4 (600 Tokens)** | **3,1 %** | **Standard im ROS-Knoten (8-Hz-Ziel)** |
-| `moge` | MoGe-2 vitl | `moge` | 3,3 (1200 Tokens) | 1,9 % | genauer, langsamer |
-| `moge3-l` | MoGe-3 vitl | `moge` | – | – | Verfeinerung nur mit CUDA, sonst nur Basisnetz |
-| `depthpro2-s` | Apple Depth Pro 2 S | `depth_pro_2` | 6,5 | 3,4 % | Gewichte nur für Forschung |
-| `depthpro2-b` | Apple Depth Pro 2 B | `depth_pro_2` | 2,9 | 2,2 % | Gewichte nur für Forschung |
-| `depthpro2-l` | Apple Depth Pro 2 L | `depth_pro_2` | 1,0 | 1,6 % | am genauesten, Forschungslizenz |
-| `depthpro2-h` | Apple Depth Pro 2 H+ | `depth_pro_2` | – | – | sehr groß (3,5 GB) |
+| Name | Modell | Paket | Hinweis |
+|---|---|---|---|
+| `moge2-s` | MoGe-2 vits-normal | `moge` | am schnellsten |
+| **`moge2-b`** | **MoGe-2 vitb-normal** | `moge` | **Standard im ROS-Knoten** |
+| `moge` | MoGe-2 vitl | `moge` | genauer, langsamer |
+| `moge3-l` | MoGe-3 vitl | `moge` | Verfeinerung nur mit CUDA, sonst nur Basisnetz |
+| `depthpro2-s` | Apple Depth Pro 2 S | `depth_pro_2` | Gewichte nur für Forschung |
+| `depthpro2-b` | Apple Depth Pro 2 B | `depth_pro_2` | Gewichte nur für Forschung |
+| `depthpro2-l` | Apple Depth Pro 2 L | `depth_pro_2` | am genauesten, Gewichte nur für Forschung |
+| `depthpro2-h` | Apple Depth Pro 2 H+ | `depth_pro_2` | sehr groß (3,5 GB) |
 
-\* Modell plus Füllung, 1280×720, Apple M4 Pro (MPS). Auf einer CUDA-GPU deutlich schneller.
-\** Mittlerer relativer Fehler in ausgeblendeten 128-px-Löchern, 6 Aufnahmen (`bench/`).
+Laufzeit und Genauigkeit der Modelle: [bench/README.md](bench/README.md).
 
 Einstellungen:
 
@@ -127,7 +195,6 @@ Umsetzung (`GradientFusion`):
 - Ein zweiter Durchgang mit Huber-Gewichten dämpft einzelne falsche Messungen.
 - c wird kantentreu auf volle Auflösung gebracht: Beim Hochskalieren zählen nur Gitterpunkte
   mit ähnlicher Modelltiefe, damit c nicht über Kanten verschmiert.
-- Laufzeit: ~24 ms pro Frame auf MPS (inklusive Kantenfilter).
 
 | Parameter | Standard | Bedeutung |
 |---|---|---|
@@ -199,19 +266,6 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 | `support_edge` | 0.1 | Zone, wenn die Messungen im Umkreis um > 10 % streuen |
 | `support_rtol` | 0.02 | erlaubte Abweichung zur Vorder- bzw. Hinterseite |
 
-## Ergebnisse
-
-Gemessen mit `bench/depth_bench.py` auf 6 Aufnahmen (Details: `bench/README.md`):
-
-| Kantenbehandlung | Kanten-Bleeding | Fehler < 3 m, kleine Löcher |
-|---|---|---|
-| keine | 20,9 % | 2,5 % |
-| alter 3×3-Kantenfilter | 3,9 % | 0,9 % |
-| **aktuell (Schritt 1 + 2)** | **0,00–0,01 %** | **0,4 % (6 mm)** |
-
-Kanten-Bleeding ist der Anteil der Pixel an Kanten, die mit mehr als 10 % Fehler gefüllt
-werden, also als schwebende Punkte enden würden.
-
 ## Code und Werkzeuge
 
 | Datei | Inhalt |
@@ -220,12 +274,8 @@ werden, also als schwebende Punkte enden würden.
 | `depth_fusion.py` | `fill` (Schritte 1–3), `GradientFusion`, `ramp_mask`, `supported` |
 | `depth_completion_node.py` | ROS-Knoten (Schritt 3 der Pipeline) |
 | `viewer.py` | Live-Anzeige an der Kamera; verworfene Pixel magenta, Filter mit `--set ramp_dmin=0 support_px=0` abschaltbar |
-| `bench/` | Offline-Benchmark ohne ROS: Genauigkeit, Bleeding, Laufzeit, Bag-Konverter |
+| `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
 
 ```bash
 python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-tokens 600
-```
-
-```bash
-cd navigation/mapping/depth_completion/bench && python depth_bench.py --frames f.npz --predict moge2-b --num-tokens 600
 ```

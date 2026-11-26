@@ -65,12 +65,13 @@ python3 -m navigation.mapping.ln_ros_camera_bridge
 ```
 
 ```bash
-python navigation/mapping/depth_completion/depth_completion_node.py   # conda-Env mit torch + Modellpaket
+python navigation/mapping/depth_completion/depth_completion_node.py   # conda-Env depthcompletion
 ```
 
 Modell und Tokenzahl stehen oben im Skript (`MODEL`, `NUM_TOKENS`, Namen aus
 `depth_models.MODELS`). Im LN-Prozessmanager das Env-Python direkt aufrufen
-(`~/miniforge3/envs/moge/bin/python`), nicht `conda run`.
+(`~/miniforge3/envs/depthcompletion/bin/python`), nicht `conda run`. Einrichten des Envs:
+[depth_completion/README.md](depth_completion/README.md), Abschnitt „Installation“.
 
 ```bash
 python3 -m navigation.mapping.camera_frame_filter --mask_humans --filter_robot
@@ -132,7 +133,7 @@ wo es schon ist: Kameratreiber, Synchronisationspuffer, `user_info` und Reset-Se
 **Ein Prozess pro Aufgabe.** Das alte `azure_interface.py` hat Kamera, Bridge, Filter, TF und
 Punktwolke in einer Schleife gemacht. Jetzt ist jeder Schritt einzeln startbar, austauschbar
 (z. B. Schritt 3 weglassen mit `--depth_source raw`, nvblox gegen octomap tauschen) und in seiner eigenen
-Umgebung lauffähig. MoGe läuft im conda-Env mit torch, der Rest im System-Python mit LN und
+Umgebung lauffähig. Schritt 3 läuft im conda-Env `depthcompletion` mit torch, der Rest im System-Python mit LN und
 `cv_bridge`.
 
 **Lokal und echtes System haben denselben Eingang.** Schritt 1 publisht exakt die LN-Topics

@@ -1,40 +1,14 @@
 # Offline-Benchmark für die Tiefenvervollständigung
 
 Testet **genau den Produktionscode** (`../depth_fusion.py` und `../depth_models.py`, die auch der
-ROS-Knoten `depth_completion_node.py` importiert) ohne ROS, Kamera oder Roboter, auf einem
-Laptop. Damit lassen sich Parameter und Code-Änderungen deterministisch vergleichen, bevor
+ROS-Knoten `depth_completion_node.py` importiert) ohne ROS, Kamera oder Roboter. Damit lassen sich Parameter und Code-Änderungen deterministisch vergleichen, bevor
 sie auf den Roboter gehen.
 
-## Einrichten (einmalig)
+## Einrichten
 
-```bash
-conda create -y -n depthbench python=3.12
-```
-
-```bash
-conda run -n depthbench pip install torch numpy opencv-python-headless
-```
-
-Für lokale Vorhersagen mit **Apple Depth Pro 2** (`--predict depthpro2-s|b|l|h`, `compare_models.py`):
-
-```bash
-conda run -n depthbench pip install git+https://github.com/apple-aiml-research/ml-depth-pro-2.git
-```
-
-Die Gewichte lädt das Paket beim ersten Start selbst nach `~/.cache/torch/hub/checkpoints`
-(S 97 MB, B 386 MB, dazu 94 MB FoV-Schätzer). Sie sind nur für nicht-kommerzielle Forschung
-freigegeben (`LICENSE_MODEL` im Repo).
-
-Für MoGe (`--predict moge|moge2-s|moge2-b`): das Repo klonen und ohne Abhängigkeiten installieren,
-weil `flex-gemm` (nur MoGe-3) Triton/CUDA braucht und auf macOS nicht baut:
-
-```bash
-conda run -n depthbench pip install --no-deps git+https://github.com/microsoft/MoGe.git
-```
-
-```bash
-conda run -n depthbench pip install rosbags scipy trimesh huggingface-hub click "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git" "pipeline @ git+https://github.com/EasternJournalist/pipeline.git"
-```
+Dasselbe conda-Env wie für den ROS-Knoten, siehe [../README.md](../README.md), Abschnitt
+„Installation“. ROS wird für den Benchmark nicht gebraucht. Die Gewichte von Depth Pro 2 sind nur
+für nicht-kommerzielle Forschung freigegeben.
 
 ## Daten
 
