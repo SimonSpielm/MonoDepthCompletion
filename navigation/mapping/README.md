@@ -42,6 +42,8 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
 | 5' | `start_octomap_mapping.py` | Alternative: ROS `octomap_server` auf der gefilterten Punktwolke. | `/camera/filtered/points` | `/octomap_point_cloud_centers` |
 | 6 | `collision_map_provider.py` | `CollisionMapProvider`: holt die Karte (nvblox oder octomap, `MAP_BACKEND`) nach Python, baut COAL-Octree / AABBs / FROCC-Map und filtert optional ein Objekt heraus. | Karten-Topic | Python-API |
 
+Algorithmus: `depth_fusion.py` (MoGe, globaler Faktor, Fusion, Kantenbereinigung, ohne ROS), offline
+testbar mit `bench/depth_bench.py` (siehe `bench/README.md`).
 Hilfsmodule: `synchronization_buffer.py` (LN-Service: Odometrie und Gelenkwinkel zu einem
 Zeitstempel), `arm_filter.py` (Arm-Maske, `depth_to_pointcloud`), `ros_utils.py`
 (Zeitstempel-Umrechnung, TF aus 4×4-Matrix).
