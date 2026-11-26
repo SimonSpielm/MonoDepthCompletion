@@ -219,10 +219,7 @@ def main():
                 torch.mps.synchronize()
             t = tick("MoGe", t)
 
-            # edge filters (ramp, support check) with the defaults of depth_fusion.fill
-            f_px = float(info_msg.k[0]) * W / info_msg.width
-            filled, log_s = fill(torch.from_numpy(depth).to(pred.device), pred, fusion, log_s,
-                                 f_px=f_px)
+            filled, log_s = fill(torch.from_numpy(depth).to(pred.device), pred, fusion, log_s)
             depth_mm = (filled * 1000.0).round().clamp(0, 65535).to(torch.int32).cpu().numpy() \
                 .astype(np.uint16)
             t = tick("Fusion", t)

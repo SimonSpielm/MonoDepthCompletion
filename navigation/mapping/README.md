@@ -119,10 +119,10 @@ python navigation/mapping/depth_completion/viewer.py --frames aufnahme.npz
 ```
 
 ```bash
-python navigation/mapping/depth_completion/viewer.py --set ramp_dmin=0 support_px=0
+python navigation/mapping/depth_completion/viewer.py --set edge_jump=0
 ```
 
-Der letzte Aufruf schaltet die Kantenfilter zum Vergleich ab. Es gibt nur einen Knoten und einen
+Der letzte Aufruf schaltet den Kantenfilter zum Vergleich ab. Es gibt nur einen Knoten und einen
 Viewer für alle Modelle; das Modell wird per Name gewählt. Die früheren Einzel-Skripte je Modell
 (`moge_depth.py`, `moge_depth_optim.py`, `moge3_depth_viewer.py`, `depthpro_depth_optim.py`,
 `fill_depth.py`) hatten je eine eigene Kopie der Fusion und sind darin aufgegangen.
@@ -155,21 +155,13 @@ wurde mit der Publish-Zeit gestempelt.
 
 **Keine Kometenschweife an Kanten.** Monokulare Modelle zeichnen Objektkanten als weiche Rampe,
 und genau dort misst der ToF-Sensor oft nichts. Ohne Gegenmaßnahme landet die Rampe als Schweif
-zwischen Vorder- und Hintergrund in der Karte. `depth_fusion.fill` verwirft deshalb gefüllte Pixel
-(gemessene bleiben immer unverändert; fliegende Pixel in der Messung entfernt Schritt 4):
-
-- *Rampenfilter* (`ramp_dmin = 0.5 m`): Für eine Ebene n·X = d gilt f·|∇(1/z)| ≤ 1/d. Geht die
-  lokale Tangentialebene der Füllung näher als 0,5 m am Kamerazentrum vorbei, ist sie (fast)
-  parallel zum Sehstrahl, also eine Rampe. Echte Flächen bleiben, z. B. der Boden mit
-  d = Kamerahöhe (≈ 0,58 m) in jeder Entfernung. **`ramp_dmin` muss unter der Kamerahöhe liegen.**
-- *Stützprüfung* (`support_px = 12`, `support_rtol = 2 %`, `support_edge = 10 %`): Ein Füllwert
-  muss im Bereich der Messungen im Umkreis von 12 px liegen. Liegen dort zwei Tiefenebenen
-  (Spanne > 10 %), muss er zu einer der beiden passen; Zwischenwerte werden verworfen.
-
-Dazu wird das Korrekturfeld der Fusion kantentreu direkt auf volle Auflösung gebracht. Auf 6
-Aufnahmen (`depth_completion/bench/README.md`) sinkt das Kanten-Bleeding damit von 3,9 % (alter 3×3-Kantenfilter)
-auf 0,00–0,01 %, der Fehler unter 3 m in kleinen Löchern von 0,9 % auf 0,4 % (6 mm). Preis: Nur
-noch 2–8 % der Kantenlöcher werden gefüllt; dort bleibt die Tiefe leer statt falsch.
+zwischen Vorder- und Hintergrund in der Karte. `depth_fusion.fill` findet deshalb Kanten in der
+geschätzten Tiefe (Sprung in 1/Tiefe > `edge_jump`), bläht sie um `edge_grow` Pixel auf und füllt
+dort nichts (gemessene Pixel bleiben immer; fliegende Pixel in der Messung entfernt Schritt 4).
+1/Tiefe statt Tiefe, weil der flach gesehene Boden darin in jeder Entfernung gleich steil ist und
+nicht als Kante gilt. Auf 6 Aufnahmen bleibt das Kanten-Bleeding damit bei 0 %, und der Filter
+ersetzt zwei frühere, schwer verständliche Tests (Ebenenabstand und Stützprüfung) bei besserer
+Genauigkeit (Details: `depth_completion/bench/README.md`).
 
 **Exakter Abgleich statt Approximation.** Farbe und Tiefe eines Frames tragen denselben
 Stempel, daher reicht ein exakter Abgleich über den Zeitstempel (kein `ApproximateTimeSynchronizer`).

@@ -11,7 +11,7 @@ the code of the ROS node (depth_models.py + depth_fusion.fill), only with a disp
     python navigation/mapping/depth_completion/viewer.py                       # live, ROS 2
     python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --stream
     python navigation/mapping/depth_completion/viewer.py --frames f.npz        # offline, no ROS
-    python navigation/mapping/depth_completion/viewer.py --set ramp_dmin=0 support_px=0  # filters off
+    python navigation/mapping/depth_completion/viewer.py --set edge_jump=0           # edge filter off
     python navigation/mapping/depth_completion/viewer.py --eval        # + error below 3 m over time
 
 Live mode subscribes the raw bridge topics (--color, --depth, --info). Offline mode plays a
@@ -19,7 +19,7 @@ frames.npz (bench/bag_to_frames.py makes one from a rosbag). --save f.rrd writes
 instead of opening the window (open it later with `rerun f.rrd`).
 
 Model depth = model prediction times the global scale. Merged depth = measurement where the
-sensor measured, filled holes elsewhere; pixels discarded by the edge filters are magenta. In
+sensor measured, filled holes elsewhere; pixels discarded by the edge filter are magenta. In
 the merged cloud, measured points have their RGB colour and filled points are orange; both can
 be toggled separately in the Rerun entity tree (cloud/merged/measured, cloud/merged/filled).
 
@@ -118,13 +118,13 @@ def live_frames(a):
 
 # ---------------------------------------------------------------- display
 
-def holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, f_px, rng):
+def holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, rng):
     """AbsRel [%] and MAE [cm] below NEAR_M on hidden 32 px blocks of measured pixels, or None."""
     H, W = depth.shape
     pick = rng.random((-(-H // 32), -(-W // 32))) < 0.15
     blocks = np.kron(pick, np.ones((32, 32), bool))[:H, :W] & (depth > 0)
     hidden = torch.where(torch.from_numpy(blocks).to(d_t.device), torch.zeros_like(d_t), d_t)
-    f, _ = fill(hidden, pred, GradientFusion(**fusion_kw), log_s, f_px=f_px, **fill_kw)
+    f, _ = fill(hidden, pred, GradientFusion(**fusion_kw), log_s, **fill_kw)
     f = f.cpu().numpy()
     m = blocks & (f > 0) & (depth < NEAR_M)
     if m.sum() < 50:
@@ -165,7 +165,7 @@ def main():
     ap.add_argument("--model", default="moge2-b", choices=MODELS)
     ap.add_argument("--num-tokens", type=int, default=600, help="MoGe only")
     ap.add_argument("--stream", action="store_true", help="Depth Pro 2 only: live stream mode")
-    ap.add_argument("--set", nargs="*", default=[], help="parameters, e.g. ramp_dmin=0 down=4")
+    ap.add_argument("--set", nargs="*", default=[], help="parameters, e.g. edge_jump=0.02 edge_grow=4 down=4")
     ap.add_argument("--frames", help="offline: play a frames.npz instead of ROS")
     ap.add_argument("--save", help="write a .rrd recording instead of opening the viewer")
     ap.add_argument("--eval", action="store_true", help="error below 3 m on hidden blocks (costs a second fill)")
@@ -178,7 +178,7 @@ def main():
 
     params = {k: float(v) for k, v in (kv.split("=", 1) for kv in a.set)}
     fusion_kw = {k: (int(v) if k in ("down", "iters") else v) for k, v in params.items() if k in FUSION_KEYS}
-    fill_kw = {k: (int(v) if k == "support_px" else v) for k, v in params.items() if k not in FUSION_KEYS}
+    fill_kw = {k: (int(v) if k == "edge_grow" else v) for k, v in params.items() if k not in FUSION_KEYS}
 
     print(f"Loading {a.model} ...")
     model = load_model(a.model, a.num_tokens, stream=a.stream)
@@ -197,7 +197,7 @@ def main():
         fov_x = math.degrees(2 * math.atan(rgb.shape[1] / (2 * fx)))
         pred = model(rgb, fov_x)
         d_t = torch.from_numpy(depth).to(model.dev)
-        filled, log_s = fill(d_t, pred, fusion, log_s, f_px=fx, **fill_kw)
+        filled, log_s = fill(d_t, pred, fusion, log_s, **fill_kw)
         filled = filled.cpu().numpy()
         est = pred.cpu().numpy() * math.exp(log_s)
         est = np.where(np.isfinite(est), est, 0).astype(np.float32)   # model x global scale
@@ -220,7 +220,7 @@ def main():
         rr.log("cloud/merged/filled", rr.Points3D(pts, colors=FILLED_COLOR, radii=-1.5))
 
         if a.eval:
-            e = holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, fx, rng)
+            e = holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, rng)
             if e:
                 err = e
                 rr.log("error/absrel", rr.Scalars(e[0]))

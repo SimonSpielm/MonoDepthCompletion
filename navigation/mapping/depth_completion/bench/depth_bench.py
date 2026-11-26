@@ -3,7 +3,7 @@
 Offline benchmark of the depth completion (no ROS, runs on a laptop).
 
 Runs EXACTLY the production code of ../depth_fusion.py (global scale, gradient
-fusion, edge filters) and depth_models.py on recorded or synthetic frames and measures accuracy
+fusion, edge filter) and depth_models.py on recorded or synthetic frames and measures accuracy
 AND edge bleeding, so parameters and code changes can be compared deterministically.
 
 Data sources
@@ -40,7 +40,7 @@ Metrics (each frame with a fresh fusion -> deterministic)
 Examples
 --------
   python depth_bench.py --synthetic 8
-  python depth_bench.py --synthetic 8 --sweep ramp_dmin=0,0.5 support_px=0,12
+  python depth_bench.py --synthetic 8 --sweep edge_jump=0,0.015,0.02 edge_grow=4,8
   python depth_bench.py --frames frames.npz --preds preds.npz --set down=4
   python depth_bench.py --frames a.npz b.npz --predict moge2-b --num-tokens 600 --hold-px 128
 """
@@ -63,7 +63,8 @@ from depth_models import MOGE, MODELS, load_model  # noqa: E402
 
 FUSION_KEYS = ("down", "lam", "mu_near", "mu_far", "far_band", "sigma_edge", "z_ref",
                "outlier", "iters", "tol")
-FILL_KEYS = ("ema", "ramp_dmin", "support_px", "support_rtol", "support_edge")
+FILL_KEYS = ("ema", "edge_jump", "edge_grow")
+INT_KEYS = ("down", "iters", "edge_grow")
 DEFAULTS = {}            # otherwise the defaults of depth_fusion.py apply
 NEAR_M = 3.0            # near range for the near metrics
 BLEED_REL = 0.10        # error above which a filled pixel counts as an outlier
@@ -172,8 +173,10 @@ def load_recorded(a, frames_path):
     tag = f"{a.predict}{a.num_tokens}" if a.predict in MOGE else a.predict
     preds_path = a.preds or (os.path.splitext(frames_path)[0] + f"_preds_{tag}.npz"
                              if a.predict else None)
-    if preds_path and os.path.exists(preds_path):
-        pred = np.load(preds_path)["pred"][:n].astype(np.float32)
+    cached = np.load(preds_path)["pred"] if preds_path and os.path.exists(preds_path) else None
+    if cached is not None and (len(cached) >= n or not a.predict):
+        pred = cached[:n].astype(np.float32)
+        n = len(pred)
     elif a.predict:
         model = load_model(a.predict, a.num_tokens, a.model_device)
         print(f"{a.predict} auf {model.dev} ...")
@@ -187,31 +190,65 @@ def load_recorded(a, frames_path):
         print(f"\n-> Cache {preds_path}")
     else:
         raise SystemExit(f"--preds missing (or --predict {'|'.join(MODELS)} to run a model locally)")
-    f_px = [0.5 * depth.shape[2] / math.tan(math.radians(fov[i]) / 2) if np.isfinite(fov[i]) else None
-            for i in range(n)]
-    return [(None, depth[i], pred[i], f_px[i]) for i in range(n)]
+    return [(None, depth[i], pred[i]) for i in range(n)]
 
 
 # ---------------------------------------------------------------- evaluation
 
-def run_fill(depth, pred, cfg, dev, f_px=None):
-    fusion = GradientFusion(**{k: cfg[k] for k in FUSION_KEYS if k in cfg})
-    kw = {k: cfg[k] for k in FILL_KEYS if k in cfg}
-    kw["f_px"] = f_px
-    if "support_px" in kw:
-        kw["support_px"] = int(kw["support_px"])
+def make_filler(cfg):
+    """fill with the parameters of cfg as f(depth_t, pred_t, log_s) -> (out, log_s).
+    The fusion object (warm start) lives as long as the returned function."""
+    ints = lambda d: {k: (int(v) if k in INT_KEYS else v) for k, v in d.items()}
+    fusion = GradientFusion(**ints({k: cfg[k] for k in FUSION_KEYS if k in cfg}))
+    kw = ints({k: cfg[k] for k in FILL_KEYS if k in cfg})
+    return lambda d, p, s: fill(d, p, fusion, s, **kw)
+
+
+def run_fill(depth, pred, cfg, dev):
     t0 = time.perf_counter()
-    out, _ = fill(torch.from_numpy(depth).to(dev), torch.from_numpy(pred).to(dev), fusion, **kw)
+    out, _ = make_filler(cfg)(torch.from_numpy(depth).to(dev), torch.from_numpy(pred).to(dev), None)
     out = out.cpu().numpy()
     return out, 1000 * (time.perf_counter() - t0)
 
 
+def temporal(scenes, cfg, dev):
+    """Flicker on static recordings: each scene is run as a sequence with state (smoothed global
+    scale, warm start), like the live node. Mean relative change between consecutive frames:
+      filled : on sensor holes (in both frames) that are filled in both frames
+      model  : model depth x global scale on the same pixels (reference: flicker of the model)
+      sensor : on pixels measured in both frames (reference: sensor noise)
+    plus the share of hole pixels that get filled (cov)."""
+    acc = {k: [] for k in ("filled", "filled_near", "model", "sensor", "cov")}
+    for frames in scenes:
+        fill_fn, log_s, prev = make_filler(cfg), None, None
+        for _, depth, pred in frames:
+            d_t, p_t = torch.from_numpy(depth).to(dev), torch.from_numpy(pred).to(dev)
+            out, log_s = fill_fn(d_t, p_t, log_s)
+            out = out.cpu().numpy()
+            model = np.where(np.isfinite(pred), pred * math.exp(log_s), 0)
+            hole = depth <= 0
+            acc["cov"].append(float((out[hole] > 0).mean()))
+            if prev is not None:
+                p_depth, p_out, p_model = prev
+                m = hole & (p_depth <= 0) & (out > 0) & (p_out > 0)
+                rel = np.abs(out - p_out)[m] / p_out[m]
+                acc["filled"].append(float(rel.mean()))
+                near = (p_out[m] < NEAR_M)
+                acc["filled_near"].append(float(rel[near].mean()) if near.any() else np.nan)
+                mm = m & (model > 0) & (p_model > 0)
+                acc["model"].append(float((np.abs(model - p_model)[mm] / p_model[mm]).mean()))
+                ms = (depth > 0) & (p_depth > 0)
+                acc["sensor"].append(float((np.abs(depth - p_depth)[ms] / p_depth[ms]).mean()))
+            prev = (depth, out, model)
+    return {k: float(np.nanmean(v)) for k, v in acc.items()}
+
+
 def evaluate(frames, cfg, dev, seed=0, hold_px=32):
     rows, ms = [], []
-    for i, (gt, depth, pred, f_px) in enumerate(frames):
+    for i, (gt, depth, pred) in enumerate(frames):
         rng = np.random.default_rng(seed + i)
         if gt is not None:                                   # synthetic: real holes
-            filled, t = run_fill(depth, pred, cfg, dev, f_px)
+            filled, t = run_fill(depth, pred, cfg, dev)
             holes = (depth <= 0) & (gt > 0)
             near = dilate(edge_mask_np(gt, 0.05), EDGE_BAND_PX)
             hold, edge = score2(filled, gt, holes & ~near, "hold"), score2(filled, gt, holes & near, "edge")
@@ -221,11 +258,11 @@ def evaluate(frames, cfg, dev, seed=0, hold_px=32):
             H, W = depth.shape
             pick = rng.random((-(-H // hold_px), -(-W // hold_px))) < 0.15
             blocks = np.kron(pick, np.ones((hold_px, hold_px), bool))[:H, :W] & valid
-            f1, t = run_fill(np.where(blocks, 0, depth).astype(np.float32), pred, cfg, dev, f_px)
+            f1, t = run_fill(np.where(blocks, 0, depth).astype(np.float32), pred, cfg, dev)
             hold = score2(f1, depth, blocks, "hold")
             e = edge_mask_np(depth, MEAS_EDGE_RTOL)
             band = dilate(e, EDGE_BAND_PX) & valid & ~e        # edge pixels themselves: uncertain
-            f2, _ = run_fill(np.where(band, 0, depth).astype(np.float32), pred, cfg, dev, f_px)
+            f2, _ = run_fill(np.where(band, 0, depth).astype(np.float32), pred, cfg, dev)
             edge = score2(f2, depth, band, "edge")
             ms.append(t)
         rows.append({**hold, **edge})
@@ -238,10 +275,11 @@ def parse_kv(items, multi):
     out = {}
     for it in items or []:
         k, v = it.split("=", 1)
-        if k not in FUSION_KEYS + FILL_KEYS:
-            raise SystemExit(f"unknown parameter '{k}', allowed: {FUSION_KEYS + FILL_KEYS}")
+        allowed = FUSION_KEYS + FILL_KEYS
+        if k not in allowed:
+            raise SystemExit(f"unknown parameter '{k}', allowed: {allowed}")
         vals = [float(x) for x in v.split(",")]
-        vals = [int(x) if k in ("down", "iters") else x for x in vals]
+        vals = [int(x) if k in INT_KEYS else x for x in vals]
         out[k] = vals if multi else vals[0]
     return out
 
@@ -260,11 +298,13 @@ def main():
     ap.add_argument("--device", default=None,
                     help="device for the fusion (cpu / cuda / mps), default: cuda, else mps, else cpu")
     ap.add_argument("--threads", type=int, default=4, help="CPU threads (limited so the machine stays usable)")
-    ap.add_argument("--set", nargs="*", help="fixed parameters, e.g. down=4 ramp_dmin=0.4")
-    ap.add_argument("--sweep", nargs="*", help="grid, e.g. ramp_dmin=0,0.5 support_px=0,12")
+    ap.add_argument("--set", nargs="*", help="fixed parameters, e.g. down=4 edge_grow=4")
+    ap.add_argument("--sweep", nargs="*", help="grid, e.g. edge_jump=0.01,0.015 edge_grow=4,8")
     ap.add_argument("--csv", help="also write results as CSV")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--hold-px", type=int, default=32, help="side length of the hidden blocks")
+    ap.add_argument("--temporal", action="store_true",
+                    help="flicker over time instead of accuracy (each --frames file = one sequence)")
     a = ap.parse_args()
 
     torch.set_num_threads(max(1, a.threads))
@@ -272,12 +312,13 @@ def main():
                             "mps" if torch.backends.mps.is_available() else "cpu")
     if a.synthetic:
         rng = np.random.default_rng(a.seed)
-        frames = [(*synth_frame(rng), 610.0) for _ in range(a.synthetic)]
+        frames = [synth_frame(rng) for _ in range(a.synthetic)]
         print(f"{len(frames)} synthetische Frames")
     else:
         if a.preds and len(a.frames) > 1:
             raise SystemExit("--preds only works with a single --frames file")
-        frames = [f for p in a.frames for f in load_recorded(a, p)]
+        scenes = [load_recorded(a, p) for p in a.frames]
+        frames = [f for sc in scenes for f in sc]
         print(f"{len(frames)} aufgenommene Frames aus {len(a.frames)} Datei(en)")
 
     base = {**DEFAULTS, **parse_kv(a.set, multi=False)}
@@ -285,6 +326,19 @@ def main():
     keys = list(grid)
     cfgs = [{**base, **dict(zip(keys, combo))} for combo in itertools.product(*grid.values())] \
         if keys else [base]
+
+    if a.temporal:
+        if a.synthetic:
+            raise SystemExit("--temporal needs recorded --frames")
+        head = " | ".join(f"{k:>9}" for k in keys) + (" | " if keys else "") + \
+            "flicker filled  <3m | model | sensor | filled cov"
+        print(head + "\n" + "-" * len(head))
+        for cfg in cfgs:
+            r = temporal(scenes, cfg, a.device)
+            print(" | ".join(f"{cfg[k]:>9g}" for k in keys) + (" | " if keys else "")
+                  + f"{100 * r['filled']:13.2f}% {100 * r['filled_near']:5.2f}% | {100 * r['model']:4.2f}% | "
+                  f"{100 * r['sensor']:5.2f}% | {100 * r['cov']:9.0f}%", flush=True)
+        return
 
     cols = ["hold_absrel", "hold_cov", "hold_near_absrel", "hold_near_cm", "hold_near_cov", "hold_near_bleed",
             "edge_bleed", "edge_cov", "edge_near_bleed", "edge_near_cov", "edge_absrel", "ms"]

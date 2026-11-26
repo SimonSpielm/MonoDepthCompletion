@@ -61,15 +61,14 @@ def main():
     data = np.load(a.frames)
     rgb, depth = data["rgb"][a.index], data["depth"][a.index].astype(np.float32)
     fov = float(data["fov_x"][a.index])
-    f_px = 0.5 * rgb.shape[1] / math.tan(math.radians(fov) / 2)
     cfg = {**PROD, **parse_kv(a.set, multi=False)}
     fus = {k: cfg[k] for k in FUSION_KEYS if k in cfg}
-    kw = {k: (int(cfg[k]) if k == "support_px" else cfg[k]) for k in FILL_KEYS if k in cfg}
+    kw = {k: (int(cfg[k]) if k == "edge_grow" else cfg[k]) for k in FILL_KEYS if k in cfg}
     d_t = torch.from_numpy(depth).to(dev)
     print(f"Gerät {dev}, Bild {rgb.shape[1]}x{rgb.shape[0]}, fill: {cfg}")
 
     def run_fill(pred):
-        return fill(d_t, pred, GradientFusion(**fus), f_px=f_px, **kw)[0]
+        return fill(d_t, pred, GradientFusion(**fus), **kw)[0]
 
     if a.fill_only:
         pred = torch.from_numpy(np.where(depth > 0, depth, 2.0).astype(np.float32)).to(dev)

@@ -39,9 +39,14 @@ vergleichbar sind.
     lesen: Wer nichts füllt, hat `bleed` 0, aber auch `cov` 0.
 - `<3m`: dieselben Werte nur für Pixel mit Tiefe unter 3 m (`AbsRel`, mittlerer Fehler in `cm`).
 - `--hold-px`: Kantenlänge der ausgeblendeten Blöcke (Standard 32). Mit 128 entstehen große
-  Löcher wie bei schwarzen Objekten oder Glas, in denen die Stützprüfung nicht mehr greift.
+  Löcher wie bei schwarzen Objekten oder Glas, weit weg von jeder Messung.
 - `ms`: Median der Laufzeit der Füllung pro Frame auf `--device`. Ist nicht mit der A6000
   vergleichbar, nur als relatives Maß. Gesamtlaufzeit Modell + Füllung: `speed.py`.
+- `--temporal`: Flackern statt Genauigkeit. Jede `--frames`-Datei läuft als Sequenz mit
+  Gedächtnis wie im Live-Knoten (geglätteter Faktor, Warmstart). Gemessen wird die mittlere
+  relative Änderung zwischen aufeinanderfolgenden Frames: auf gefüllten Pixeln (`filled`, auch
+  unter 3 m), zum Vergleich für das Modell allein (`model`) und für den Sensor (`sensor`). Sinnvoll
+  nur mit Aufnahmen einer stillstehenden Kamera.
 
 ## Beispiele
 
@@ -50,17 +55,21 @@ python depth_bench.py --synthetic 8
 ```
 
 ```bash
-python depth_bench.py --synthetic 8 --sweep ramp_dmin=0,0.5 support_px=0,12
+python depth_bench.py --synthetic 8 --sweep edge_jump=0,0.015,0.02 edge_grow=4,8
 ```
 
 ```bash
 python depth_bench.py --frames frames.npz --preds preds.npz --set down=8 --csv out.csv
 ```
 
+```bash
+python depth_bench.py --frames a.npz b.npz --predict moge2-b --num-tokens 600 --limit 15 --temporal
+```
+
 Mit `--set` und `--sweep` lassen sich alle Parameter von `GradientFusion`
 (`down, lam, mu_near, mu_far, far_band, sigma_edge, z_ref, outlier, iters, tol`) sowie die
-Parameter von `fill` (`ema, ramp_dmin, support_px, support_rtol, support_edge`) setzen.
-`ramp_dmin=0 support_px=0` schaltet die Kantenfilter ab. Ohne Angabe gelten die Standardwerte aus `depth_fusion.py` (= Produktion).
+Parameter von `fill` (`ema, edge_jump, edge_grow`) setzen. `edge_jump=0` schaltet den
+Kantenfilter ab. Ohne Angabe gelten die Standardwerte aus `depth_fusion.py` (= Produktion).
 
 ## Laufzeit
 
@@ -85,19 +94,37 @@ in Innenräumen.
 
 Gemessen auf einem M4 Pro (MPS): Depth Pro 2 S 130 ms, B 326 ms pro Frame bei 1280×720.
 
-## Ergebnisse (6 Aufnahmen, je 2 Frames, Fusion auf MPS)
+## Ergebnisse (6 Aufnahmen, Fusion auf MPS)
 
-Kantenfilter, Depth Pro 2 S, kleine Löcher (32 px):
+### Verfahren im Vergleich (MoGe-2 B, 600 Tokens)
 
-| Kantenbehandlung | <3m AbsRel | edge bleed | edge cov |
-|---|---|---|---|
-| keine | 2,48 % | 20,9 % | 100 % |
-| alter 3×3-Kantenfilter (inzwischen entfernt) | 0,86 % | 3,95 % | 68 % |
-| neu: Rampenfilter + Stützprüfung (Standard) | 0,40 % | 0,00 % | 5 % |
+Genauigkeit mit je 2 Frames pro Aufnahme, Flackern mit je 15 aufeinanderfolgenden Frames (13
+bei `rosbag`). Fehler unter 3 m.
 
-Einrasten von Zwischenwerten auf die nähere Seite statt Verwerfen wurde getestet und verworfen
-(21 % Bleeding, landet oft auf der falschen Seite). Die Fusionsparameter (`down`, `lam`,
-`sigma_edge`) ändern den Fehler in großen Löchern kaum; er wird vom Modell bestimmt.
+| Verfahren | kleine Löcher | große Löcher (128 px) | Abdeckung klein / groß | Kanten-Bleeding | gefüllte Kantenlöcher | Flackern gefüllt | ms |
+|---|---|---|---|---|---|---|---|
+| ohne Kantenfilter (Depth Pro 2 S) | 2,48 % | – | – | 20,9 % | 100 % | – | – |
+| alter 3×3-Kantenfilter (Depth Pro 2 S) | 0,86 % | – | – | 3,95 % | 68 % | – | – |
+| Fusion + Ebenenabstand + Stützprüfung (bis Nov. 2026) | 0,40 % | 3,06 % | 87 / 89 % | 0,00 % | 2 % | 1,49 % | 24 |
+| einfach: geglätteter Korrekturfaktor + Kantentest | 0,33–0,35 % | 5,7–7,7 % | 52–67 / 45–60 % | 0,15–0,64 % | 3–24 % | 1,31 % | 4 |
+| **Fusion + Kantentest 1/Tiefe (Standard)** | **0,30 %** | **2,07 %** | 81 / 82 % | **0,00 %** | **19 %** | 1,29 % | 13 |
+
+- Das einfache Verfahren mittelt den Korrekturfaktor über Kanten hinweg und hat in großen
+  Löchern keine Führung entlang der Flächen; deshalb bleibt die Fusion.
+- Der Kantentest misst den Sprung in 1/Tiefe statt in der Tiefe: Im relativen Tiefensprung galt
+  der flach gesehene Boden ab etwa 2 m als Kante, die Abdeckung sank auf 24–73 %.
+- Flackern: Das Modell allein ändert sich von Frame zu Frame um 1,4–1,6 %, der Sensor um 0,2 %.
+  Keine Variante beruhigt das Modell nennenswert; das Flackern kommt vom Modell.
+- Einrasten von Zwischenwerten auf die nähere Seite statt Verwerfen wurde getestet und verworfen
+  (21 % Bleeding, landet oft auf der falschen Seite).
+- Die Fusionsparameter (`down`, `lam`, `sigma_edge`) ändern den Fehler in großen Löchern kaum;
+  er wird vom Modell bestimmt.
+
+### Modelle
+
+Gemessen noch mit dem früheren Kantenfilter (Ebenenabstand + Stützprüfung) und nicht neu
+gerechnet; mit dem aktuellen Filter für MoGe-2 B siehe oben. Die Laufzeiten enthalten die
+damalige Füllung (24 ms), die aktuelle braucht 13 ms.
 
 Modelle, Laufzeit auf M4 Pro (MPS, 1280×720, Modell + Füllung mit 40 CG-Iterationen), Fehler und
 Bleeding unter 3 m:

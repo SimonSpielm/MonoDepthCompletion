@@ -19,7 +19,12 @@ Grundregeln:
 | Tiefenmodell | schätzt aus dem RGB-Bild eine metrische Tiefe für **jedes** Pixel | `depth_models.py` |
 | 1 Globaler Faktor | bringt die Schätzung grob auf den Maßstab der Messung | `depth_fusion.fill` |
 | 2 Gradienten-Fusion | passt die Schätzung lokal an die Messungen an, ohne ihre Form zu zerstören | `depth_fusion.GradientFusion` |
-| 3 Kantenfilter | verwirft gefüllte Pixel, die als schwebende Punkte enden würden | `depth_fusion.ramp_mask`, `supported` |
+| 3 Kantenfilter | verwirft gefüllte Pixel an Tiefenkanten, die als schwebende Punkte enden würden | `depth_fusion.jump_edges` |
+
+So läuft das an einer einzelnen Bildzeile ab: ein Objekt in 1,5 m vor einer Wand in 3 m, mit drei
+Löchern in der Messung (vereinfacht, 80 Pixel statt 1280):
+
+![Die Schritte an einer Bildzeile](img/schritte.gif)
 
 ## Installation
 
@@ -110,7 +115,7 @@ Eine Aufnahme aus dem Labor (MoGe-2 B, 600 Tokens):
    jenseits der Reichweite, dazu Löcher an den Rollstühlen und an Kanten.
 3. **Modell × globaler Faktor**: Die Schätzung deckt das ganze Bild ab, Kanten sind weich.
 4. **Gefüllt**: Messung plus gefüllte Löcher. Magenta sind die Pixel, die der Kantenfilter
-   verworfen hat, sie bleiben leer. Hier sind 96 % des Bildes gefüllt, 4 % verworfen.
+   verworfen hat, sie bleiben leer. Hier sind 92 % des Bildes gefüllt, 8 % verworfen.
 
 ## Tiefenschätzung: welche Modelle es gibt
 
@@ -223,33 +228,25 @@ die Rampe eingefüllt: Werte wie 1,9 m oder 2,4 m zwischen einem Objekt in 1,5 m
 3 m. In der Karte sind das Punkte, die zwischen Objekt und Wand in der Luft schweben
 (Kanten-Bleeding).
 
-Der Filter arbeitet nach dem Prinzip **Kante finden → Zone um die Kante → dort prüfen**, in zwei
-Schritten:
+Der Filter macht drei einfache Schritte: **Kante finden → Zone um die Kante → dort nichts
+füllen.**
+
+1. **Kante finden**: In der korrigierten Modelltiefe wird für jedes Pixel geschaut, wie stark
+   sich 1/Tiefe im 5×5-Fenster ändert. Springt sie um mehr als `edge_jump` (0,015 1/m), liegt
+   dort eine Kante. Der Sprung von 1,5 m auf 3 m ist in 1/Tiefe 0,67 → 0,33, also weit darüber.
+2. **Zone**: Die Kante wird um `edge_grow` (8 px) aufgebläht, damit auch die flachen Enden der
+   Rampe dazugehören.
+3. **Nicht füllen**: Gefüllte Pixel in der Zone werden verworfen und bleiben leer. Gemessene
+   Pixel bleiben immer.
 
 ![Kantenfilter](img/kantenfilter.svg)
 
-**Schritt 1, zu steil, um echt zu sein (`ramp_mask`).** Auf der Rampe ändert sich die Tiefe von
-Pixel zu Pixel um viele Zentimeter. Eine echte Fläche sieht im Bild nur dann so steil aus, wenn
-man fast genau an ihr entlang schaut. Geometrisch: Für eine Ebene mit Abstand d zur Kamera gilt
-f · |∇(1/z)| ≤ 1/d. Eine Rampe läuft verlängert fast durch die Kamera (d ≈ 0), echte Flächen
-nicht.
+**Warum 1/Tiefe und nicht die Tiefe selbst?** Der Boden läuft flach von der Kamera weg. In der
+Tiefe wird er nach hinten immer steiler, ein fester Schwellwert würde den fernen Boden als Kante
+verwerfen. In 1/Tiefe ist jede ebene Fläche eine Gerade: Der Boden ist in jeder Entfernung gleich
+steil und bleibt unter der Schwelle, nur echte Kanten springen darüber.
 
-![Rampe in der Seitenansicht](img/rampe_seitenansicht.svg)
-
-Verworfen wird, was einer Fläche mit d < 0,5 m (`ramp_dmin`) entspräche. Der Boden bleibt in
-jeder Entfernung erhalten, denn sein Abstand ist die Kamerahöhe (≈ 0,58 m). Weil der Test jedes
-Pixel einzeln betrachtet, ist die Maske automatisch so breit wie die Rampe.
-
-**Schritt 2, passt der Wert zu einer Seite? (`supported`).** Übrig bleiben die flachen Enden der
-Rampe und Stellen, an denen das Modell leicht versetzt liegt. Für jedes gefüllte Pixel wird
-geschaut, was die Kinect im Umkreis von 12 Pixeln gemessen hat:
-
-- **Messungen nah und fern** im Umkreis (streuen um > 10 %): Das Pixel liegt in der Zone um eine
-  Tiefenkante. Der Wert muss auf ±2 % zur Vorderseite **oder** zur Hinterseite passen, sonst
-  wird er verworfen. Ein Wert dazwischen wäre Luft.
-- **Ähnliche Messungen** (glatte Fläche, z. B. ein dunkler Fleck auf der Wand): Der Wert muss im
-  Bereich der Nachbarmessungen liegen (±2 %). Das passt fast immer, die Füllung bleibt.
-- **Keine Messung** im Umkreis (Inneres eines großen Lochs): Es greift nur Schritt 1.
+![Warum 1/z](img/warum_1_durch_z.svg)
 
 So sieht das in 3D von oben aus. Grau ist gemessen, blau gefüllt, der Boden ist ausgeblendet:
 
@@ -260,29 +257,26 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 
 **Grenzen**
 
-- Kantenlöcher bleiben zu großen Teilen leer: Nur 2–8 % des schmalen Bands an Tiefenkanten
-  werden noch gefüllt, dafür ohne Fehler.
-- Echte Flächen, die man fast genau von der Seite sieht (Ebene näher als 0,5 m an der
-  Kamera), verwirft Schritt 1 ebenfalls. Ein Beispiel ist eine Wand, an der der Roboter in
-  weniger als 0,5 m Abstand entlangfährt. Links in der Draufsicht fällt eine schräg gesehene
-  Fläche weg, vermutlich so ein Fall (dort gibt es keine Messung zum Vergleich).
-- `ramp_dmin` muss unter der Kamerahöhe liegen, sonst verschwindet der Boden.
+- In der Zone um Kanten bleibt die Tiefe leer. Von den Löchern direkt an Tiefenkanten wird etwa
+  ein Fünftel gefüllt, dafür ohne Fehler.
+- Sehr nahe Flächen, auf die man fast genau von der Seite schaut (z. B. eine Wand, an der der
+  Roboter in weniger als ~0,5 m Abstand entlangfährt), ändern sich in 1/Tiefe ebenfalls stark
+  und werden als Kante verworfen. Links in der Draufsicht fällt eine schräg gesehene Fläche weg,
+  vermutlich so ein Fall.
 
 | Parameter | Standard | Bedeutung |
 |---|---|---|
-| `ramp_dmin` | 0.5 m | Schritt 1: Mindestabstand einer echten Fläche zur Kamera, 0 = aus |
-| `support_px` | 12 px | Schritt 2: Umkreis = Breite der Zone um Kanten, 0 = aus |
-| `support_edge` | 0.1 | Zone, wenn die Messungen im Umkreis um > 10 % streuen |
-| `support_rtol` | 0.02 | erlaubte Abweichung zur Vorder- bzw. Hinterseite |
+| `edge_jump` | 0.015 1/m | ab welchem Sprung in 1/Tiefe (im 5×5-Fenster) eine Kante vorliegt, 0 = Filter aus |
+| `edge_grow` | 8 px | Breite der Zone um eine Kante, in der nichts gefüllt wird |
 
 ## Code und Werkzeuge
 
 | Datei | Inhalt |
 |---|---|
 | `depth_models.py` | Modelle, `load_model(name)` |
-| `depth_fusion.py` | `fill` (Schritte 1–3), `GradientFusion`, `ramp_mask`, `supported` |
+| `depth_fusion.py` | `fill` (Schritte 1–3), `global_scale`, `GradientFusion`, `jump_edges` |
 | `depth_completion_node.py` | ROS-Knoten (Schritt 3 der Pipeline) |
-| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte orange, Filter mit `--set ramp_dmin=0 support_px=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
+| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte orange, Filter mit `--set edge_jump=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
 | `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
 
 ```bash

@@ -6,12 +6,10 @@ Depth completion without ROS: sensor depth with holes + prediction of a monocula
   2. Gradient fusion: correction field c with log D = log M + c that matches the measurements,
      is smooth along surfaces (the model provides the shape), does not act across edges and
      decays to 0 far behind the measured range. Preconditioned CG on the GPU.
-  3. Edge filters against floating points. The model draws depth discontinuities as a soft
+  3. Edge filter against floating points. The model draws depth discontinuities as a soft
      ramp; exactly there the sensor often measures nothing, so the ramp would end up as points
-     between foreground and background in the map. Filled pixels are discarded if they
-       a) lie on the ramp itself: too steep for a real surface (ramp_mask), or
-       b) lie in the zone around a measured depth edge and match neither the near nor the far
-          side (supported).
+     between foreground and background in the map. Depth edges are found in the completed
+     model depth (a jump in 1/z), dilated, and filled pixels there are discarded.
      Measured pixels are never changed. A hole is harmless, a point in mid-air is not.
 
 Used by the ROS node (depth_completion_node.py), the viewer (viewer.py) and the
@@ -181,93 +179,55 @@ class GradientFusion:
         return acc / wsum
 
 
-@torch.inference_mode()
-def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, f_px=None,
-         ramp_dmin=0.5, support_px=12, support_rtol=0.02, support_edge=0.1):
-    """Fills the holes of depth_m. Returns (completed [m], log_s); 0 = empty.
-
-    depth_m: sensor depth [m], 0 = hole. pred: model depth [m], inf = invalid. Both torch
-    tensors (H, W) on the same device. prev_log_s: global scale of the previous frame (log).
-    f_px: focal length [px] for the ramp filter (without f_px it is off).
-
-    Edge filters (find the edge -> zone around the edge -> check there):
-      ramp_dmin   [m]  step 1, ramp_mask: discard the model's smeared edge. 0 = off.
-                       Must stay below the camera height (floor: distance = camera height
-                       ≈ 0.58 m).
-      support_px  [px] step 2, supported: radius in which real measurements are looked up
-                       (= width of the zone around depth edges). 0 = off.
-      support_edge     a zone exists where the measurements in the radius spread by > 10 %.
-      support_rtol     allowed deviation from the near or far side (2 %).
-    """
-    valid = depth_m > 0
+def global_scale(depth_m, pred, prev_log_s=None, ema=0.3):
+    """Model depth times the median of measurement / model (every 4th pixel), smoothed over time.
+    Returns (scaled prediction with 0 = invalid, log of the scale)."""
     pvalid = torch.isfinite(pred) & (pred > 0)
-
-    # 1. global scale (robust median, every 4th pixel is enough)
-    sub = (valid & pvalid)[::4, ::4]
+    sub = ((depth_m > 0) & pvalid)[::4, ::4]
     log_s = prev_log_s if prev_log_s is not None else 0.0
     if int(sub.sum()) > 200:
         ratio = depth_m[::4, ::4][sub] / pred[::4, ::4][sub]
         cur = float(torch.log(torch.quantile(ratio, 0.5) if ratio.numel() <= 16_000_000
                               else ratio.median()))
         log_s = cur if prev_log_s is None else (1 - ema) * prev_log_s + ema * cur
-    est = torch.where(pvalid, pred * math.exp(log_s), torch.zeros_like(pred))
-
-    # 2. local correction
-    est = fusion(depth_m, est)
-
-    # 3. edge filters: only filled pixels are discarded, measurements stay
-    keep = est > 0
-    if ramp_dmin > 0 and f_px:
-        keep &= ~ramp_mask(est, f_px, ramp_dmin)
-    if support_px > 0:
-        keep &= supported(est, depth_m, support_px, support_rtol, support_edge)
-    filled = torch.where(valid, depth_m, torch.where(keep, est, torch.zeros_like(est)))
-    return filled, log_s
+    return torch.where(pvalid, pred * math.exp(log_s), torch.zeros_like(pred)), log_s
 
 
-def ramp_mask(est, f_px, dmin, s=2):
-    """Step 1: pixels on the model's smeared edge ("too steep to be real").
+def jump_edges(est, edge_jump, edge_grow, w=5):
+    """Depth edges of est, dilated by edge_grow px (find the edge -> zone around it).
 
-    The model draws a jump from 1.5 m to 3 m as a ramp 1.6 -> 1.9 -> 2.4 -> 2.8 m. A real surface
-    can only look that steep in the image if one looks almost exactly along it. Formally: for a
-    plane at distance d from the camera centre, f·|∇(1/z)| ≤ 1/d. Extended, a ramp passes almost
-    through the camera (d ≈ 0), real surfaces do not: the floor has d = camera height at any
-    range. Pixels with f·|∇(1/z)| > 1/dmin are discarded, so the mask automatically adapts to
-    the width of the ramp. Gradient as central difference over ±s pixels; pairs with an invalid
-    neighbour do not count.
+    An edge is a jump of more than edge_jump [1/m] in inverse depth q = 1/z inside a w×w window.
+    Measured in 1/z, a flat surface such as the floor changes evenly at any distance (a
+    plane is linear in 1/z) and is not mistaken for an edge, while the soft ramp the model draws
+    between an object at 1.5 m and a wall at 3 m is a jump of ~0.33 1/m.
     """
     v = est > 0
     q = torch.where(v, 1.0 / torch.where(v, est, torch.ones_like(est)), torch.zeros_like(est))
-    g2 = torch.zeros_like(q)
-    gu = (q[:, 2 * s:] - q[:, : -2 * s]) / (2 * s)
-    gv = (q[2 * s:, :] - q[: -2 * s, :]) / (2 * s)
-    g2[:, s:-s] += torch.where(v[:, 2 * s:] & v[:, : -2 * s], gu * gu, torch.zeros_like(gu))
-    g2[s:-s, :] += torch.where(v[2 * s:, :] & v[: -2 * s, :], gv * gv, torch.zeros_like(gv))
-    return (f_px * f_px) * g2 > 1.0 / (dmin * dmin)
+    qmax = F.max_pool2d(q[None, None], w, 1, w // 2)[0, 0]
+    qmin = -F.max_pool2d(-torch.where(v, q, torch.full_like(q, 1e9))[None, None], w, 1, w // 2)[0, 0]
+    edge = v & (qmax - qmin > edge_jump)
+    if edge_grow > 0:
+        g = 2 * edge_grow + 1
+        edge = F.max_pool2d(edge[None, None].float(), g, 1, edge_grow)[0, 0] > 0
+    return edge
 
 
-def supported(est, depth_m, r, rtol, edge):
-    """Step 2: does the filled value match the real measurements within radius r?
+@torch.inference_mode()
+def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, edge_jump=0.015, edge_grow=8):
+    """Fills the holes of depth_m. Returns (completed [m], log_s); 0 = empty.
 
-    The smallest (dmin) and largest (dmax) measurement in the (2r+1)² window are determined.
-      - no measurement in the window (inside large holes): kept.
-      - similar measurements (dmax ≤ dmin·(1+edge)), smooth surface: est must lie in
-        [dmin·(1-rtol), dmax·(1+rtol)].
-      - strongly spread measurements: the pixel is in the zone around a depth edge (the edge
-        "dilated" by r px). est must match the near side (dmin) OR the far side (dmax) within
-        ±rtol; values in between would be points in mid-air.
-    Returns the mask of pixels that may stay.
+    depth_m: sensor depth [m], 0 = hole. pred: model depth [m], inf = invalid. Both torch
+    tensors (H, W) on the same device. fusion: a GradientFusion kept over frames (warm start).
+    prev_log_s: global scale of the previous frame (log), ema: its smoothing over time.
+
+    Edge filter (jump_edges): edge_jump [1/m] = jump in 1/z that counts as an edge,
+    edge_grow [px] = width of the zone around an edge in which nothing is filled. 0 = off.
     """
-    v = depth_m > 0
-    k = 2 * r + 1
-
-    def mx(a):                                   # separable k×k max pooling
-        a = F.max_pool2d(a[None, None], (1, k), 1, (0, r))
-        return F.max_pool2d(a, (k, 1), 1, (r, 0))[0, 0]
-
-    dmax = mx(torch.where(v, depth_m, torch.zeros_like(depth_m)))
-    dmin = -mx(-torch.where(v, depth_m, torch.full_like(depth_m, 1e9)))
-    inside = (est >= dmin * (1 - rtol)) & (est <= dmax * (1 + rtol))
-    near_side = (torch.abs(est - dmin) <= rtol * dmin) | (torch.abs(est - dmax) <= rtol * dmax)
-    is_edge = dmax > dmin * (1 + edge)
-    return (dmax <= 0) | (inside & (~is_edge | near_side))
+    valid = depth_m > 0
+    est, log_s = global_scale(depth_m, pred, prev_log_s, ema)            # 1. global scale
+    est = fusion(depth_m, est)                                           # 2. local correction
+    keep = est > 0                                                       # 3. edge filter
+    if edge_jump > 0:
+        keep &= ~jump_edges(est, edge_jump, edge_grow)
+    filled = torch.where(valid, depth_m, torch.where(keep, est, torch.zeros_like(est)))
+    return filled, log_s
