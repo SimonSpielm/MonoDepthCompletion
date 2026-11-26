@@ -3,7 +3,7 @@
 Offline benchmark for the depth completion (no ROS, runs on a laptop).
 
 Runs EXACTLY the production algorithm from navigation/mapping/depth_fusion.py
-(MoGe wrapper, global scale, gradient fusion, edge cleanup) on recorded or
+(global scale, gradient fusion, edge filters) and depth_models.py on recorded or
 synthetic frames and reports accuracy AND edge bleeding, so parameters and code
 changes can be compared deterministically.
 
@@ -14,8 +14,8 @@ Data sources
   --preds  P.npz    cached predictions for these frames: pred (N,H,W) [m]
                     (moge_sweep.py infer, or --predict below)
   --predict MODEL   run the monocular model locally (CUDA / Apple MPS / CPU) and
-                    cache its predictions: depthpro2-s / -b / -l / -h (Apple Depth
-                    Pro 2) or moge (MoGe-2, production model, needs the moge package)
+                    cache its predictions, any name of depth_models.MODELS:
+                    moge, moge2-s, moge2-b, moge3-l, depthpro2-s / -b / -l / -h
   --synthetic N     N synthetic scenes (floor, wall, boxes, thin poles) with a
                     ToF-like sensor (holes at edges, dark blobs, range drop-out,
                     flying pixels) and a MoGe-like prediction (soft edge ramps,
@@ -24,7 +24,7 @@ Data sources
 Metrics (each frame is evaluated with a fresh fusion -> deterministic)
 ------------------------------------------------------------------------
   recorded frames, ground truth = sensor measurements that are hidden on purpose:
-    hold_*  : random 32 px blocks of measured pixels hidden (protocol of the sweeps)
+    hold_*  : random 32 px blocks (--hold-px) of measured pixels hidden (protocol of the sweeps)
     edge_*  : a 6 px band around measured depth edges hidden (what the ToF really
               loses at edges); evaluated on that band
   synthetic frames, ground truth = known scene depth:
@@ -40,10 +40,9 @@ Metrics (each frame is evaluated with a fresh fusion -> deterministic)
 Examples
 --------
   python depth_bench.py --synthetic 8
-  python depth_bench.py --synthetic 8 --sweep edge_rtol=0,0.03,0.04,0.06 sigma_edge=0.02,0.05
+  python depth_bench.py --synthetic 8 --sweep ramp_dmin=0,0.5 support_px=0,12
   python depth_bench.py --frames frames.npz --preds preds.npz --set down=8
-  python depth_bench.py --frames frames.npz --predict depthpro2-s --device mps
-  python depth_bench.py --frames frames.npz --predict depthpro2-b --device mps
+  python depth_bench.py --frames a.npz b.npz --predict moge2-b --num-tokens 600 --hold-px 128
 """
 import argparse
 import csv
@@ -58,13 +57,15 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from depth_fusion import GradientFusion, MoGe, fill  # noqa: E402
+from depth_fusion import GradientFusion, fill  # noqa: E402
+from depth_models import MOGE, MODELS, load_model  # noqa: E402
 
 
 FUSION_KEYS = ("down", "lam", "mu_near", "mu_far", "far_band", "sigma_edge", "z_ref",
                "outlier", "iters", "tol")
-FILL_KEYS = ("ema", "edge_rtol")
-DEFAULTS = {"edge_rtol": 0.04}
+FILL_KEYS = ("ema", "ramp_dmin", "support_px", "support_rtol", "support_edge")
+DEFAULTS = {}            # sonst gelten die Standardwerte aus depth_fusion.py
+NEAR_M = 3.0           # Nahbereich für die near-Metriken
 BLEED_REL = 0.10        # Fehler, ab dem ein gefülltes Pixel als Ausreißer zählt
 EDGE_BAND_PX = 6
 MEAS_EDGE_RTOL = 0.10   # Kante in der Messung: Spanne im 3x3 > 10 %
@@ -89,13 +90,22 @@ def dilate(mask, px):
 def score(filled, gt, mask):
     n = int(mask.sum())
     if n == 0:
-        return dict(absrel=np.nan, cov=np.nan, bleed=np.nan)
+        return dict(absrel=np.nan, cov=np.nan, bleed=np.nan, cm=np.nan)
     f, g = filled[mask], gt[mask]
     hit = f > 0
-    rel = np.abs(f[hit] - g[hit]) / g[hit]
+    err = np.abs(f[hit] - g[hit])
+    rel = err / g[hit]
     return dict(absrel=float(rel.mean()) if hit.any() else np.nan,
                 cov=float(hit.mean()),
-                bleed=float((rel > BLEED_REL).sum() / n))
+                bleed=float((rel > BLEED_REL).sum() / n),
+                cm=float(100 * err.mean()) if hit.any() else np.nan)
+
+
+def score2(filled, gt, mask, prefix):
+    """Gesamt und Nahbereich (gt < NEAR_M)."""
+    out = {f"{prefix}_{k}": v for k, v in score(filled, gt, mask).items()}
+    out.update({f"{prefix}_near_{k}": v for k, v in score(filled, gt, mask & (gt < NEAR_M)).items()})
+    return out
 
 
 # ---------------------------------------------------------------- synthetische Szene
@@ -152,58 +162,20 @@ def synth_frame(rng, H=720, W=1280, fx=610.0, cam_h=0.58):
     return gt, sensor.astype(np.float32), pred
 
 
-# ---------------------------------------------------------------- Modelle
-
-class DepthPro2:
-    """Apple Depth Pro 2 (Paket depth_pro_2), gleiche Schnittstelle wie depth_fusion.MoGe.
-
-    Größen: depthpro2-s (24M), -b (97M), -l (334M), -h (872M). Die Gewichte lädt das Paket beim
-    ersten Start selbst (~/.cache/torch/hub/checkpoints). Jedes Bild wird einzeln gerechnet
-    (model.infer), damit Läufe deterministisch und vergleichbar sind. Nur Forschungslizenz.
-    """
-
-    MAX_DEPTH = 50.0   # [m] darüber (Himmel) gilt als ungültig
-
-    def __init__(self, name="depthpro2-s", device=None):
-        from depth_pro_2 import create_model_and_transforms
-        kw = {} if device is None else {"device": torch.device(device)}
-        self.model, self.transform = create_model_and_transforms(name, **kw)
-        self.model.eval()
-        self.dev = next(self.model.parameters()).device
-
-    @torch.inference_mode()
-    def __call__(self, rgb, fov_x):
-        f_px = None if fov_x is None else 0.5 * rgb.shape[1] / math.tan(math.radians(fov_x) / 2)
-        d = self.model.infer(self.transform(np.ascontiguousarray(rgb)), f_px=f_px)["depth"].float()
-        bad = ~torch.isfinite(d) | (d <= 0) | (d > self.MAX_DEPTH)
-        return torch.where(bad, torch.full_like(d, float("inf")), d)
-
-
-MODELS = ("moge", "depthpro2-s", "depthpro2-b", "depthpro2-l", "depthpro2-h")
-
-
-def make_model(name, num_tokens=1200, device=None):
-    if name == "moge":                       # Produktionsmodell (Paket moge nötig)
-        return MoGe(num_tokens=num_tokens, device=device)
-    if name.startswith("depthpro2-"):
-        return DepthPro2(name, device=device)
-    raise SystemExit(f"unbekanntes Modell '{name}' ({', '.join(MODELS)})")
-
-
 # ---------------------------------------------------------------- Daten laden
 
-def load_recorded(a):
-    data = np.load(a.frames)
+def load_recorded(a, frames_path):
+    data = np.load(frames_path)
     depth = data["depth"].astype(np.float32)
     n = min(len(depth), a.limit) if a.limit else len(depth)
     fov = data["fov_x"].astype(np.float64) if "fov_x" in data else np.full(len(depth), np.nan)
-    tag = f"moge{a.num_tokens}" if a.predict == "moge" else a.predict
-    preds_path = a.preds or (os.path.splitext(a.frames)[0] + f"_preds_{tag}.npz"
+    tag = f"{a.predict}{a.num_tokens}" if a.predict in MOGE else a.predict
+    preds_path = a.preds or (os.path.splitext(frames_path)[0] + f"_preds_{tag}.npz"
                              if a.predict else None)
     if preds_path and os.path.exists(preds_path):
         pred = np.load(preds_path)["pred"][:n].astype(np.float32)
     elif a.predict:
-        model = make_model(a.predict, a.num_tokens, a.model_device)
+        model = load_model(a.predict, a.num_tokens, a.model_device)
         print(f"{a.predict} auf {model.dev} ...")
         preds = []
         for i in range(n):
@@ -215,44 +187,48 @@ def load_recorded(a):
         print(f"\n-> Cache {preds_path}")
     else:
         raise SystemExit(f"--preds fehlt (oder --predict {'|'.join(MODELS)}, um lokal zu rechnen)")
-    return [(None, depth[i], pred[i]) for i in range(n)]
+    f_px = [0.5 * depth.shape[2] / math.tan(math.radians(fov[i]) / 2) if np.isfinite(fov[i]) else None
+            for i in range(n)]
+    return [(None, depth[i], pred[i], f_px[i]) for i in range(n)]
 
 
 # ---------------------------------------------------------------- Auswertung
 
-def run_fill(depth, pred, cfg, dev):
+def run_fill(depth, pred, cfg, dev, f_px=None):
     fusion = GradientFusion(**{k: cfg[k] for k in FUSION_KEYS if k in cfg})
     kw = {k: cfg[k] for k in FILL_KEYS if k in cfg}
+    kw["f_px"] = f_px
+    if "support_px" in kw:
+        kw["support_px"] = int(kw["support_px"])
     t0 = time.perf_counter()
     out, _ = fill(torch.from_numpy(depth).to(dev), torch.from_numpy(pred).to(dev), fusion, **kw)
     out = out.cpu().numpy()
     return out, 1000 * (time.perf_counter() - t0)
 
 
-def evaluate(frames, cfg, dev, seed=0):
+def evaluate(frames, cfg, dev, seed=0, hold_px=32):
     rows, ms = [], []
-    for i, (gt, depth, pred) in enumerate(frames):
+    for i, (gt, depth, pred, f_px) in enumerate(frames):
         rng = np.random.default_rng(seed + i)
         if gt is not None:                                   # synthetisch: echte Löcher
-            filled, t = run_fill(depth, pred, cfg, dev)
+            filled, t = run_fill(depth, pred, cfg, dev, f_px)
             holes = (depth <= 0) & (gt > 0)
             near = dilate(edge_mask_np(gt, 0.05), EDGE_BAND_PX)
-            hold, edge = score(filled, gt, holes & ~near), score(filled, gt, holes & near)
+            hold, edge = score2(filled, gt, holes & ~near, "hold"), score2(filled, gt, holes & near, "edge")
             ms.append(t)
         else:                                                # Aufnahme: Messungen ausblenden
             valid = depth > 0
             H, W = depth.shape
-            pick = rng.random((-(-H // 32), -(-W // 32))) < 0.15
-            blocks = np.kron(pick, np.ones((32, 32), bool))[:H, :W] & valid
-            f1, t = run_fill(np.where(blocks, 0, depth).astype(np.float32), pred, cfg, dev)
-            hold = score(f1, depth, blocks)
+            pick = rng.random((-(-H // hold_px), -(-W // hold_px))) < 0.15
+            blocks = np.kron(pick, np.ones((hold_px, hold_px), bool))[:H, :W] & valid
+            f1, t = run_fill(np.where(blocks, 0, depth).astype(np.float32), pred, cfg, dev, f_px)
+            hold = score2(f1, depth, blocks, "hold")
             e = edge_mask_np(depth, MEAS_EDGE_RTOL)
             band = dilate(e, EDGE_BAND_PX) & valid & ~e        # Kantenpixel selbst: unsicher
-            f2, _ = run_fill(np.where(band, 0, depth).astype(np.float32), pred, cfg, dev)
-            edge = score(f2, depth, band)
+            f2, _ = run_fill(np.where(band, 0, depth).astype(np.float32), pred, cfg, dev, f_px)
+            edge = score2(f2, depth, band, "edge")
             ms.append(t)
-        rows.append({**{f"hold_{k}": v for k, v in hold.items()},
-                     **{f"edge_{k}": v for k, v in edge.items()}})
+        rows.append({**hold, **edge})
     res = {k: float(np.nanmean([r[k] for r in rows])) for k in rows[0]}
     res["ms"] = float(np.median(ms))
     return res
@@ -273,7 +249,7 @@ def parse_kv(items, multi):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--frames")
+    src.add_argument("--frames", nargs="+", help="eine oder mehrere frames.npz (Mittel über alle)")
     src.add_argument("--synthetic", type=int)
     ap.add_argument("--preds")
     ap.add_argument("--predict", choices=MODELS,
@@ -281,21 +257,28 @@ def main():
     ap.add_argument("--num-tokens", type=int, default=1200, help="nur MoGe")
     ap.add_argument("--model-device", default=None, help="cuda / mps / cpu (Standard: automatisch)")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--device", default="cpu", help="Gerät für die Fusion (cpu / cuda / mps)")
-    ap.add_argument("--set", nargs="*", help="feste Parameter, z. B. down=8 edge_rtol=0.03")
-    ap.add_argument("--sweep", nargs="*", help="Raster, z. B. edge_rtol=0,0.04 sigma_edge=0.02,0.05")
+    ap.add_argument("--device", default=None,
+                    help="Gerät für die Fusion (cpu / cuda / mps), Standard: cuda, sonst mps, sonst cpu")
+    ap.add_argument("--threads", type=int, default=4, help="CPU-Threads (begrenzt, damit der Rechner bedienbar bleibt)")
+    ap.add_argument("--set", nargs="*", help="feste Parameter, z. B. down=4 ramp_dmin=0.4")
+    ap.add_argument("--sweep", nargs="*", help="Raster, z. B. ramp_dmin=0,0.5 support_px=0,12")
     ap.add_argument("--csv", help="Ergebnisse zusätzlich als CSV")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--hold-px", type=int, default=32, help="Kantenlänge der ausgeblendeten Blöcke")
     a = ap.parse_args()
 
-    torch.set_num_threads(max(1, os.cpu_count() or 1))
+    torch.set_num_threads(max(1, a.threads))
+    a.device = a.device or ("cuda" if torch.cuda.is_available() else
+                            "mps" if torch.backends.mps.is_available() else "cpu")
     if a.synthetic:
         rng = np.random.default_rng(a.seed)
-        frames = [synth_frame(rng) for _ in range(a.synthetic)]
+        frames = [(*synth_frame(rng), 610.0) for _ in range(a.synthetic)]
         print(f"{len(frames)} synthetische Frames")
     else:
-        frames = load_recorded(a)
-        print(f"{len(frames)} aufgenommene Frames aus {a.frames}")
+        if a.preds and len(a.frames) > 1:
+            raise SystemExit("--preds geht nur mit einer --frames-Datei")
+        frames = [f for p in a.frames for f in load_recorded(a, p)]
+        print(f"{len(frames)} aufgenommene Frames aus {len(a.frames)} Datei(en)")
 
     base = {**DEFAULTS, **parse_kv(a.set, multi=False)}
     grid = parse_kv(a.sweep, multi=True)
@@ -303,21 +286,24 @@ def main():
     cfgs = [{**base, **dict(zip(keys, combo))} for combo in itertools.product(*grid.values())] \
         if keys else [base]
 
-    cols = ["hold_absrel", "hold_cov", "edge_bleed", "edge_cov", "edge_absrel", "ms"]
+    cols = ["hold_absrel", "hold_cov", "hold_near_absrel", "hold_near_cm", "hold_near_cov", "hold_near_bleed",
+            "edge_bleed", "edge_cov", "edge_near_bleed", "edge_near_cov", "edge_absrel", "ms"]
     head = " | ".join(f"{k:>6}" for k in keys) + (" | " if keys else "") + \
-        "hold AbsRel  cov | edge bleed   cov  AbsRel |     ms"
+        "hold AbsRel  cov | <3m AbsRel   cm  cov | edge bleed  cov <3m bleed  cov |    ms"
     print(head + "\n" + "-" * len(head))
     results = []
     for cfg in cfgs:
-        r = evaluate(frames, cfg, a.device, a.seed)
+        r = evaluate(frames, cfg, a.device, a.seed, a.hold_px)
         results.append({**{k: cfg[k] for k in keys}, **r})
         print(" | ".join(f"{cfg[k]:>6g}" for k in keys) + (" | " if keys else "")
               + f"{100 * r['hold_absrel']:10.2f}% {100 * r['hold_cov']:4.0f}% | "
-              f"{100 * r['edge_bleed']:9.2f}% {100 * r['edge_cov']:4.0f}% {100 * r['edge_absrel']:6.2f}% | "
-              f"{r['ms']:6.0f}", flush=True)
+              f"{100 * r['hold_near_absrel']:9.2f}% {r['hold_near_cm']:4.1f} {100 * r['hold_near_cov']:3.0f}% | "
+              f"{100 * r['edge_bleed']:9.2f}% {100 * r['edge_cov']:3.0f}% "
+              f"{100 * r['edge_near_bleed']:8.2f}% {100 * r['edge_near_cov']:3.0f}% | "
+              f"{r['ms']:5.0f}", flush=True)
     if a.csv:
         with open(a.csv, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=keys + cols)
+            w = csv.DictWriter(f, fieldnames=keys + cols, extrasaction="ignore")
             w.writeheader()
             w.writerows(results)
         print(f"-> {a.csv}")

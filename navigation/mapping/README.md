@@ -36,14 +36,16 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
 |---|---|---|---|---|
 | 1 | `ln_camera_publisher.py` | Azure Kinect per k4a auslesen, RGB, registrierte Tiefe und K mit Zeitstempel auf LN publishen. **Nur mit lokal angeschlossener Kamera**, auf dem echten System gibt es den Treiber schon. | k4a | LN `camera.perception/*` |
 | 2 | `ln_ros_camera_bridge.py` | LN-Kameradaten 1:1 nach ROS. `read()` blockiert, also kein Timer: jeder Frame wird sofort weitergereicht. | LN | `/camera/*` (roh) |
-| 3 | `moge_depth_completion.py` | MoGe-2 + Gradienten-Fusion (CG auf der GPU) füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/*` |
+| 3 | `moge_depth_completion.py` | MoGe-2 (Standard vitb-normal, 600 Tokens, ~9 Hz auf M4 Pro) + Gradienten-Fusion (CG auf der GPU) füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/*` |
 | 4 | `camera_frame_filter.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, fliegende Pixel an Tiefenkanten, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--depth_source raw` nimmt die rohe Tiefe (ohne Schritt 3), `--no-publish_pointcloud` schaltet die Punktwolke ab. | `/camera/completed/*` | `/tf`, `/camera/filtered/*` |
 | 5 | `start_nvblox.py` | TSDF-Karte aus der gefilterten Tiefe, belegte Voxel um die Kamera als Punktwolke, isolierte Voxel (Speckles) entfernt. LN-Service `nvblox.reset_map`. | `/camera/filtered/depth/image_raw` | `/nvblox/occupied_points_rgb` |
 | 5' | `start_octomap_mapping.py` | Alternative: ROS `octomap_server` auf der gefilterten Punktwolke. | `/camera/filtered/points` | `/octomap_point_cloud_centers` |
 | 6 | `collision_map_provider.py` | `CollisionMapProvider`: holt die Karte (nvblox oder octomap, `MAP_BACKEND`) nach Python, baut COAL-Octree / AABBs / FROCC-Map und filtert optional ein Objekt heraus. | Karten-Topic | Python-API |
 
-Algorithmus: `depth_fusion.py` (MoGe, globaler Faktor, Fusion, Kantenbereinigung, ohne ROS), offline
-testbar mit `bench/depth_bench.py` (siehe `bench/README.md`).
+Ohne ROS und von Knoten, Viewer und Benchmark gemeinsam genutzt:
+`depth_models.py` (MoGe-2/3 und Depth Pro 2 hinter einer Schnittstelle, `load_model(name)`) und
+`depth_fusion.py` (globaler Faktor, Fusion, Kantenfilter; Einstieg `fill`). Offline testbar mit
+`bench/` (siehe `bench/README.md`).
 Hilfsmodule: `synchronization_buffer.py` (LN-Service: Odometrie und Gelenkwinkel zu einem
 Zeitstempel), `arm_filter.py` (Arm-Maske, `depth_to_pointcloud`), `ros_utils.py`
 (Zeitstempel-Umrechnung, TF aus 4×4-Matrix).
@@ -66,9 +68,9 @@ python3 -m navigation.mapping.ln_ros_camera_bridge
 python navigation/mapping/moge_depth_completion.py           # conda-Env mit torch + MoGe
 ```
 
-Im LN-Prozessmanager das Env-Python direkt aufrufen (`~/miniforge3/envs/moge/bin/python`),
-nicht `conda run`. Der MoGe-3-Viewer läuft im separaten Env
-`~/miniforge3/envs/moge3`.
+Modell und Tokenzahl stehen oben im Skript (`MODEL`, `NUM_TOKENS`, Namen aus
+`depth_models.MODELS`). Im LN-Prozessmanager das Env-Python direkt aufrufen
+(`~/miniforge3/envs/moge/bin/python`), nicht `conda run`.
 
 ```bash
 python3 -m navigation.mapping.camera_frame_filter --mask_humans --filter_robot
@@ -96,19 +98,27 @@ Schritt 6 wird nicht gestartet, sondern von `Arm_Collision_Model` instanziiert.
 
 ## Dev-Viewer
 
-Vergleichs-/Debug-Viewer, nicht Teil der Produktivkette. Sie abonnieren die rohen
-Bridge-Topics (`/camera/color/image_raw`, `/camera/depth/image_raw`,
-`/camera/color/camera_info`, rgb8/16UC1) und publizieren selbst nichts. Sie laufen in
-der LN-Config unter `navigation/mapping/dev` und können parallel zur Pipeline laufen
-(beachten: GPU-Speicher, da jeder Viewer ein eigenes Modell lädt).
+`dev/depth_viewer.py` zeigt RGB | Sensortiefe | gefüllte Tiefe live und rechnet dabei genau den
+Code von Schritt 3 (`depth_models` + `depth_fusion.fill`). Nicht Teil der Produktivkette: Er
+abonniert die rohen Bridge-Topics, publisht nichts und kann parallel zur Pipeline laufen
+(eigenes Modell im GPU-Speicher). Vom Kantenfilter verworfene Pixel sind magenta, Taste `e`
+schaltet die Fehlerauswertung unter 3 m an/aus.
 
-| Skript | Zweck |
-|---|---|
-| `navigation/mapping/fill_depth.py` | PromptDA-Viewer |
-| `navigation/mapping/dev/moge_depth.py` | MoGe-2-Viewer (globaler Faktor + lokal affin) |
-| `navigation/mapping/dev/moge_depth_optim.py` | MoGe-2-Viewer (Gradienten-Fusion) |
-| `navigation/mapping/dev/moge3_depth_viewer.py` | MoGe-3-Viewer (eigenes `moge3`-Conda-Env) |
-| `navigation/mapping/dev/depthpro_depth_optim.py` | Apple Depth Pro 2 Viewer (eigenes `depthpro2`-Conda-Env) |
+```bash
+python navigation/mapping/dev/depth_viewer.py --model moge2-b --num-tokens 600
+```
+
+```bash
+python navigation/mapping/dev/depth_viewer.py --model depthpro2-s --stream
+```
+
+```bash
+python navigation/mapping/dev/depth_viewer.py --set ramp_dmin=0 support_px=0
+```
+
+Der letzte Aufruf schaltet die Kantenfilter zum Vergleich ab. Die früheren Einzel-Viewer
+(`moge_depth.py`, `moge_depth_optim.py`, `moge3_depth_viewer.py`, `depthpro_depth_optim.py`,
+`fill_depth.py`) hatten je eine eigene Kopie der Fusion und sind darin aufgegangen.
 
 ## Designentscheidungen
 
@@ -136,13 +146,23 @@ und Gelenkwinkel *dieses* Frames im Puffer (nötig für die Armmaske, gerade wen
 dazubringt), und nvblox/octomap finden über TF genau die Kamerapose dieses Frames. Vorher
 wurde mit der Publish-Zeit gestempelt.
 
-**Keine Kometenschweife an Kanten.** MoGe zeichnet Objektkanten als weiche Rampe, und genau
-dort misst der ToF-Sensor oft nichts. Ohne Gegenmaßnahme landet die Rampe als Schweif zwischen
-Vorder- und Hintergrund in der Karte. Zwei Stellen in Schritt 3 verhindern das: Das Korrekturfeld
-der Fusion wird kantentreu direkt auf volle Auflösung gebracht (vorher halbe Auflösung + bilinear,
-was c über Kanten verschmiert hat), und gefüllte Pixel auf Tiefenkanten (Spanne im 3×3 > 4 %,
-`FILL_EDGE_RTOL`) werden auf 0 gesetzt. Gemessene Pixel bleiben unverändert; fliegende Pixel
-in der Messung entfernt Schritt 4.
+**Keine Kometenschweife an Kanten.** Monokulare Modelle zeichnen Objektkanten als weiche Rampe,
+und genau dort misst der ToF-Sensor oft nichts. Ohne Gegenmaßnahme landet die Rampe als Schweif
+zwischen Vorder- und Hintergrund in der Karte. `depth_fusion.fill` verwirft deshalb gefüllte Pixel
+(gemessene bleiben immer unverändert; fliegende Pixel in der Messung entfernt Schritt 4):
+
+- *Rampenfilter* (`ramp_dmin = 0.5 m`): Für eine Ebene n·X = d gilt f·|∇(1/z)| ≤ 1/d. Geht die
+  lokale Tangentialebene der Füllung näher als 0,5 m am Kamerazentrum vorbei, ist sie (fast)
+  parallel zum Sehstrahl, also eine Rampe. Echte Flächen bleiben, z. B. der Boden mit
+  d = Kamerahöhe (≈ 0,58 m) in jeder Entfernung. **`ramp_dmin` muss unter der Kamerahöhe liegen.**
+- *Stützprüfung* (`support_px = 12`, `support_rtol = 2 %`, `support_edge = 10 %`): Ein Füllwert
+  muss im Bereich der Messungen im Umkreis von 12 px liegen. Liegen dort zwei Tiefenebenen
+  (Spanne > 10 %), muss er zu einer der beiden passen; Zwischenwerte werden verworfen.
+
+Dazu wird das Korrekturfeld der Fusion kantentreu direkt auf volle Auflösung gebracht. Auf 6
+Aufnahmen (bench/README.md) sinkt das Kanten-Bleeding damit von 3,9 % (alter 3×3-Kantenfilter)
+auf 0,00–0,01 %, der Fehler unter 3 m in kleinen Löchern von 0,9 % auf 0,4 % (6 mm). Preis: Nur
+noch 2–6 % der Kantenlöcher werden gefüllt; dort bleibt die Tiefe leer statt falsch.
 
 **Exakter Abgleich statt Approximation.** Farbe und Tiefe eines Frames tragen denselben
 Stempel, daher reicht ein exakter Abgleich über den Zeitstempel (kein `ApproximateTimeSynchronizer`).
@@ -170,10 +190,9 @@ schnellen Pfad von `CollisionMapProvider` (`use_pointcloud_fast`).
 **TF kommt aus Schritt 4.** Der Knoten, der ohnehin den Synchronisationspuffer abfragt, stempelt
 `map → Wt` mit der Odometrie zum Frame-Zeitstempel und publisht sie vor Tiefe und Punktwolke.
 
-**Fusion nur auf der GPU.** Die CPU-Variante der Gradienten-Fusion und die Live-Anzeige mit
-Holdout-Fehlerauswertung sind entfallen. Die Parameter sind die Optima aus
-`moge_sweep_ergebnisse/moge_optim_sweep_ergebnisse.md`. Die Fusions-Mathematik ist
-unverändert aus `moge_depth_optim.py` übernommen.
+**Fusion nur auf der GPU (CUDA oder Apple MPS).** Die CPU-Variante der Gradienten-Fusion ist
+entfallen. Die Fusions-Mathematik stammt aus dem früheren `moge_depth_optim.py`; die Parameter
+(`down=2`, `sigma_edge=0.05`, 40 CG-Iterationen) sind mit `bench/` auf 6 Aufnahmen bestimmt.
 
 **Schwebende Voxel an zwei Stellen filtern, ohne die Rate zu drücken.** Die meisten
 schwebenden Voxel stammen von fliegenden Pixeln an Tiefenkanten (Mischwerte aus Vorder- und

@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from depth_bench import MODELS, edge_mask_np, make_model  # noqa: E402
+from depth_bench import MODELS, edge_mask_np, load_model  # noqa: E402
 
 
 def colorize(d, lo, hi):
@@ -66,11 +66,11 @@ def main():
         fov = a.fov_x
     print(f"Bild {rgb.shape[1]}x{rgb.shape[0]}, FoV_x {fov if fov else 'vom Modell geschätzt'}")
 
-    runs = [(f"MoGe-2 {a.num_tokens} Tok." if m == "moge" else "DepthPro2-" + m.split("-")[1].upper(),
-             m, a.num_tokens) for m in a.models]
+    runs = [((("MoGe-2-L" if m == "moge" else m) + f" {a.num_tokens} Tok.") if m.startswith("moge")
+             else "DepthPro2-" + m.split("-")[1].upper(), m, a.num_tokens) for m in a.models]
     results = []
     for name, kind, tok in runs:
-        model = make_model(kind, tok, a.device)
+        model = load_model(kind, tok, a.device)
         model(rgb, fov)                                    # Aufwärmen
         if model.dev.type == "mps":
             torch.mps.synchronize()

@@ -24,6 +24,9 @@ get color, depth and camera_info with one identical stamp and need no pairing of
    von Oberflächen glatt ist (MoGe gibt die Form vor), nicht über Kanten wirkt und hinter dem
    Messbereich auf 0 abklingt. Gelöst per vorkonditioniertem CG auf der GPU.
    Gemessene Pixel bleiben unverändert.
+4. Kantenfilter gegen schwebende Punkte (depth_fusion.fill): gefüllte Pixel auf der verschmierten
+   Kante des Modells (zu steil für eine echte Fläche) und Pixel in der Zone um echte Tiefenkanten,
+   die weder zur Vorder- noch zur Hinterseite passen, werden verworfen.
 
 MoGe is slower than the camera: only the newest frame is processed, older ones are dropped.
 
@@ -52,21 +55,25 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
-MODEL = "Ruicheng/moge-2-vitl"
-NUM_TOKENS = 1200
+# Modell (depth_models.MODELS) / Auflösung. Gemessen auf M4 Pro (MPS), 1280x720, inkl. Fusion
+# (bench/speed.py), Fehler <3 m in großen Löchern (bench/depth_bench.py --hold-px 128):
+#   moge2-s  600:  85 ms, 3.8 %  | moge2-b  600: 107 ms, 3.1 %  <- 8 Hz-Ziel
+#   moge2-b 1200: 182 ms, 2.8 %  | moge    1200: 306 ms, 1.9 %  | depthpro2-l: 1029 ms, 1.6 %
+MODEL = "moge2-b"
+NUM_TOKENS = 600
 COLOR_TOPIC = "/camera/color/image_raw"
 DEPTH_TOPIC = "/camera/depth/image_raw"
 INFO_TOPIC = "/camera/color/camera_info"
 OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
 OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
 OUT_INFO_TOPIC = "/camera/completed/camera_info"
-FILL_EDGE_RTOL = 0.04  # gefüllte Pixel an Tiefenkanten verwerfen: Tiefenspanne im 3x3 > 4 %, 0 = aus
 RGB_BUFFER = 10        # zuletzt empfangene RGB-Bilder, nach Zeitstempel abrufbar (~0.7 s bei 15 Hz)
 
 
 # Algorithmus (ROS-frei, auch vom Offline-Benchmark genutzt)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from depth_fusion import GradientFusion, MoGe, fill  # noqa: E402
+from depth_fusion import GradientFusion, fill  # noqa: E402
+from depth_models import load_model  # noqa: E402
 
 # ---------------------------------------------------------------- ROS
 
@@ -169,10 +176,10 @@ class MoGeDepthCompletion(Node):
 # ---------------------------------------------------------------- Hauptschleife
 
 def main():
-    print("Lade MoGe-2 ...")
-    moge = MoGe(MODEL, NUM_TOKENS)
-    if moge.dev.type != "cuda":
-        print("WARNUNG: keine CUDA-GPU, MoGe und Fusion laufen auf der CPU (sehr langsam).")
+    print(f"Lade {MODEL} ({NUM_TOKENS} Tokens) ...")
+    moge = load_model(MODEL, NUM_TOKENS)
+    if moge.dev.type == "cpu":
+        print("WARNUNG: keine GPU, Modell und Fusion laufen auf der CPU (sehr langsam).")
     rclpy.init()
     node = MoGeDepthCompletion()
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
@@ -205,10 +212,14 @@ def main():
             pred = moge(rgb, fov_x)
             if moge.dev.type == "cuda":
                 torch.cuda.synchronize()
+            elif moge.dev.type == "mps":
+                torch.mps.synchronize()
             t = tick("MoGe", t)
 
+            # Kantenfilter (Rampen, Stützprüfung) mit den Standardwerten aus depth_fusion.fill
+            f_px = float(info_msg.k[0]) * W / info_msg.width
             filled, log_s = fill(torch.from_numpy(depth).to(pred.device), pred, fusion, log_s,
-                                 edge_rtol=FILL_EDGE_RTOL)
+                                 f_px=f_px)
             depth_mm = (filled * 1000.0).round().clamp(0, 65535).to(torch.int32).cpu().numpy() \
                 .astype(np.uint16)
             t = tick("Fusion", t)

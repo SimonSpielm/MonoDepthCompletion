@@ -9,3 +9,6 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# Aufnahmen (ROS-Bags, mehrere GB)
+rosbags/
