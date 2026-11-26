@@ -134,6 +134,14 @@ und Gelenkwinkel *dieses* Frames im Puffer (nötig für die Armmaske, gerade wen
 dazubringt), und nvblox/octomap finden über TF genau die Kamerapose dieses Frames. Vorher
 wurde mit der Publish-Zeit gestempelt.
 
+**Keine Kometenschweife an Kanten.** MoGe zeichnet Objektkanten als weiche Rampe, und genau
+dort misst der ToF-Sensor oft nichts. Ohne Gegenmaßnahme landet die Rampe als Schweif zwischen
+Vorder- und Hintergrund in der Karte. Zwei Stellen in Schritt 3 verhindern das: Das Korrekturfeld
+der Fusion wird kantentreu direkt auf volle Auflösung gebracht (vorher halbe Auflösung + bilinear,
+was c über Kanten verschmiert hat), und gefüllte Pixel auf Tiefenkanten (Spanne im 3×3 > 4 %,
+`FILL_EDGE_RTOL`) werden auf 0 gesetzt. Gemessene Pixel bleiben unverändert; fliegende Pixel
+in der Messung entfernt Schritt 4.
+
 **Exakter Abgleich statt Approximation.** Farbe und Tiefe eines Frames tragen denselben
 Stempel, daher reicht ein exakter Abgleich über den Zeitstempel (kein `ApproximateTimeSynchronizer`).
 `camera_info` ist statisch und wird nicht mitsynchronisiert.

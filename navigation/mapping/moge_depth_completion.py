@@ -61,6 +61,7 @@ INFO_TOPIC = "/camera/color/camera_info"
 OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
 OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
 OUT_INFO_TOPIC = "/camera/completed/camera_info"
+FILL_EDGE_RTOL = 0.04  # gefüllte Pixel an Tiefenkanten verwerfen: Tiefenspanne im 3x3 > 4 %, 0 = aus
 RGB_BUFFER = 10        # zuletzt empfangene RGB-Bilder, nach Zeitstempel abrufbar (~0.7 s bei 15 Hz)
 
 
@@ -168,11 +169,9 @@ class GradientFusion:
         x = self._cg(wm2 * r, wm2 + mu + deg, wx, wy, x)
         self._c_prev = x
 
-        H2, W2 = H // 2, W // 2
-        logM2 = logM[: 2 * H2: 2, : 2 * W2: 2]          # = cv2 INTER_NEAREST bei Faktor 2
-        c_half = self._guided_upsample(x, gM, logM2, H2, W2)
-        c_full = F.interpolate(c_half[None, None], size=(H, W), mode="bilinear",
-                               align_corners=False)[0, 0]
+        # Kantentreu direkt auf volle Auflösung: ein zusätzlicher bilinearer Schritt
+        # (halbe -> volle Auflösung) würde c über Objektkanten verschmieren.
+        c_full = self._guided_upsample(x, gM, logM, H, W)
         return torch.where(pv, est * torch.exp(c_full), zero)
 
     def _guided_upsample(self, c, gM, logM, H, W):
@@ -215,7 +214,28 @@ def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3):
         log_s = cur if prev_log_s is None else (1 - ema) * prev_log_s + ema * cur
     est = torch.where(pvalid, pred * math.exp(log_s), torch.zeros_like(pred))
     est = fusion(depth_m, est)
-    return torch.where(valid, depth_m, est), log_s
+    filled = torch.where(valid, depth_m, est)
+    if FILL_EDGE_RTOL > 0:
+        # MoGe zeichnet Objektkanten als weiche Rampe; genau dort misst der ToF oft nichts,
+        # sodass die Rampe als "Kometenschweif" zwischen Vorder- und Hintergrund landet.
+        # Gefüllte Pixel auf solchen Kanten werden verworfen, Messungen bleiben unverändert.
+        on_edge = depth_edge(filled, FILL_EDGE_RTOL)
+        filled = torch.where(on_edge & ~valid, torch.zeros_like(filled), filled)
+    return filled, log_s
+
+
+def depth_edge(d, rtol, k=3):
+    """Pixel, deren Tiefenspanne (max - min) im k×k-Fenster > rtol·Tiefe ist (Löcher ignoriert).
+
+    Wie utils3d.depth_edge aus dem MoGe-Repo. Bei rtol=0.04 wird eine Rampe von 1 m auf 2 m bis
+    ~16 px Breite fast ganz, bis ~30 px zu zwei Dritteln entfernt; flach gesehener Boden (Kamera
+    0.58 m hoch) bleibt bis ~7 m Entfernung erhalten.
+    """
+    v = d > 0
+    inf = torch.full_like(d, float("inf"))
+    dmax = F.max_pool2d(torch.where(v, d, torch.zeros_like(d))[None, None], k, 1, k // 2)[0, 0]
+    dmin = -F.max_pool2d(-torch.where(v, d, inf)[None, None], k, 1, k // 2)[0, 0]
+    return v & ((dmax - dmin) > rtol * d)
 
 
 # ---------------------------------------------------------------- MoGe
