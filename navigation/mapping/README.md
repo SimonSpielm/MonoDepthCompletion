@@ -14,7 +14,7 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
                                       │  /camera/color/camera_info
                                       ▼
                                [3] moge_depth_completion.py            (GPU)
-                                      │  /camera/completed/depth/image_raw   (Farbe + camera_info bleiben auf /camera/color/*)
+                                      │  /camera/completed/{color/image_raw, depth/image_raw, camera_info}
                                       ▼
   synchronization_buffer.py ──► [4] camera_frame_filter.py ◄── user_info (W_T_CAM)
   (Odometrie + q über die Zeit)       │  /tf  (map → Wt → camera, Wt → ground)
@@ -36,8 +36,8 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
 |---|---|---|---|---|
 | 1 | `ln_camera_publisher.py` | Azure Kinect per k4a auslesen, RGB, registrierte Tiefe und K mit Zeitstempel auf LN publishen. **Nur mit lokal angeschlossener Kamera**, auf dem echten System gibt es den Treiber schon. | k4a | LN `camera.perception/*` |
 | 2 | `ln_ros_camera_bridge.py` | LN-Kameradaten 1:1 nach ROS. `read()` blockiert, also kein Timer: jeder Frame wird sofort weitergereicht. | LN | `/camera/*` (roh) |
-| 3 | `moge_depth_completion.py` | MoGe-2 + Gradienten-Fusion (CG auf der GPU) füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/depth/image_raw` |
-| 4 | `camera_frame_filter.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, fliegende Pixel an Tiefenkanten, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--depth_source raw` nimmt die rohe Tiefe (ohne Schritt 3), `--no-publish_pointcloud` schaltet die Punktwolke ab. | `/camera/completed/depth/image_raw`, `/camera/color/*` | `/tf`, `/camera/filtered/*` |
+| 3 | `moge_depth_completion.py` | MoGe-2 + Gradienten-Fusion (CG auf der GPU) füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/*` |
+| 4 | `camera_frame_filter.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, fliegende Pixel an Tiefenkanten, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--depth_source raw` nimmt die rohe Tiefe (ohne Schritt 3), `--no-publish_pointcloud` schaltet die Punktwolke ab. | `/camera/completed/*` | `/tf`, `/camera/filtered/*` |
 | 5 | `start_nvblox.py` | TSDF-Karte aus der gefilterten Tiefe, belegte Voxel um die Kamera als Punktwolke, isolierte Voxel (Speckles) entfernt. LN-Service `nvblox.reset_map`. | `/camera/filtered/depth/image_raw` | `/nvblox/occupied_points_rgb` |
 | 5' | `start_octomap_mapping.py` | Alternative: ROS `octomap_server` auf der gefilterten Punktwolke. | `/camera/filtered/points` | `/octomap_point_cloud_centers` |
 | 6 | `collision_map_provider.py` | `CollisionMapProvider`: holt die Karte (nvblox oder octomap, `MAP_BACKEND`) nach Python, baut COAL-Octree / AABBs / FROCC-Map und filtert optional ein Objekt heraus. | Karten-Topic | Python-API |
@@ -83,8 +83,8 @@ Optionen von Schritt 4:
   verwenden. Schaltet aus Zeitstempel-Gründen auch Farbe und `camera_info` auf die rohen Topics.
 - `--raw` — Kurzform für `--depth_source raw`.
 
-Hinweis: `start_nvblox` liest `camera_info` und Farbe direkt von `/camera/color/*`, funktioniert
-also mit und ohne laufendes MoGe.
+Hinweis: `start_nvblox` liest `camera_info`/Farbe standardmäßig von `/camera/completed/*`.
+Ohne laufendes MoGe müssen `camera_info_topic`/`rgb_topic` auf `/camera/color/*` gesetzt werden.
 
 ```bash
 python3 -m navigation.mapping.start_nvblox                   # oder: ros2 launch navigation/mapping/start_octomap_mapping.py
@@ -142,9 +142,10 @@ Stempel, daher reicht ein exakter Abgleich über den Zeitstempel (kein `Approxim
 Der Knoten verarbeitet immer nur den neuesten Frame und verwirft ältere, sonst würde die
 Latenz unbegrenzt wachsen. Die Tiefe ist der einzige Trigger, es gibt keinen Synchronizer:
 Das RGB-Bild (MoGe braucht es als Eingang) wird aus einem kleinen Puffer über den identischen
-Zeitstempel geholt. Ein verlorenes RGB-Bild kostet so nur diesen einen Frame. MoGe publisht nur
-die gefüllte Tiefe; Farbe und `camera_info` lesen nachfolgende Knoten direkt von `/camera/color/*`.
-Das spart pro Frame 2,8 MB Republish und doppelte Deserialisierung.
+Zeitstempel geholt. Ein verlorenes RGB-Bild kostet so nur diesen einen Frame. Das verwendete
+RGB-Bild und `camera_info` werden mit der gefüllten Tiefe unter demselben Stempel neu publisht.
+Die gefüllte Tiefe kommt ~100 ms nach dem Rohbild; so müssen nachfolgende Knoten (Menschenmaske,
+nvblox-Einfärbung) nicht selbst über diese Latenz hinweg RGB puffern und zuordnen.
 
 **Filtern nach dem Füllen.** Menschen und Arm werden in Schritt 4 maskiert, also *nach* MoGe.
 MoGe sieht dadurch das ganze Bild (bessere Skalierung), und was in Arm- oder Menschbereiche
@@ -178,10 +179,12 @@ selbst bleibt unverändert; der Filter wirkt nur auf die publizierte Punktwolke.
 
 | Topic | Typ | Von | Nach |
 |---|---|---|---|
-| `/camera/color/image_raw` | `Image` rgb8 | 2 | 3, 4, 5 (Einfärbung) |
+| `/camera/color/image_raw` | `Image` rgb8 | 2 | 3, (4 mit `--depth_source raw`) |
 | `/camera/depth/image_raw` | `Image` 16UC1 mm | 2 | 3, (4 mit `--depth_source raw`) |
-| `/camera/color/camera_info`, `/camera/depth/camera_info` | `CameraInfo` | 2 | 3, 4, 5 |
+| `/camera/color/camera_info`, `/camera/depth/camera_info` | `CameraInfo` | 2 | 3, (4 mit `--depth_source raw`) |
+| `/camera/completed/color/image_raw` | `Image` rgb8 | 3 | 4, 5 (Einfärbung) |
 | `/camera/completed/depth/image_raw` | `Image` 16UC1 mm | 3 | 4 |
+| `/camera/completed/camera_info` | `CameraInfo` | 3 | 4, 5 |
 | `/tf` | `map → Wt → camera`, `Wt → ground` | 4 | 5, 5', RViz |
 | `/camera/filtered/depth/image_raw` | `Image` 16UC1 mm | 4 | 5 |
 | `/camera/filtered/points` | `PointCloud2` (Frame `camera`) | 4 | 5', RViz |

@@ -100,8 +100,8 @@ class TsdfOccupiedColoredPointCloud(Node):
 
         # -------- parameters --------
         self.declare_parameter("depth_topic", "camera/filtered/depth/image_raw")   # camera_frame_filter.py
-        self.declare_parameter("camera_info_topic", "camera/color/camera_info")
-        self.declare_parameter("rgb_topic", "camera/color/image_raw")   # muss auf Depth registriert sein!
+        self.declare_parameter("camera_info_topic", "camera/completed/camera_info")
+        self.declare_parameter("rgb_topic", "camera/completed/color/image_raw")   # muss auf Depth registriert sein!
 
         self.declare_parameter("camera_frame", "camera")
         self.declare_parameter("global_frame", "map")

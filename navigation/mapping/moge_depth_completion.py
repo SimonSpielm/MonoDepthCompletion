@@ -2,19 +2,21 @@
 r"""
 Step 3: MoGe-2 mono depth completion (ROS 2, GPU, no visualisation).
 
-Fills the holes of the sensor depth and publishes ONLY the completed depth with the
-ORIGINAL header (stamp = LN capture timestamp, frame_id = camera):
+Fills the holes of the sensor depth and publishes the completed depth together with the
+matching RGB image and camera_info, all with the ORIGINAL header (stamp = LN capture
+timestamp, frame_id = camera):
 
-    /camera/depth/image_raw   (trigger)  --\
-    /camera/color/image_raw   (MoGe input) >-- MoGe + Fusion --> /camera/completed/depth/image_raw
-    /camera/color/camera_info (FoV, static)/                     (16UC1, mm)
+    /camera/depth/image_raw   (trigger)  --\                    /camera/completed/depth/image_raw (16UC1, mm)
+    /camera/color/image_raw   (MoGe input) >-- MoGe + Fusion -->  /camera/completed/color/image_raw
+    /camera/color/camera_info (FoV, static)/                     /camera/completed/camera_info
 
 The depth image is the only trigger, there is no message_filters synchronizer.
 MoGe predicts depth FROM the RGB image, so RGB is still needed as input: it is kept
 in a small buffer and looked up by the stamp of the depth image (the bridge stamps
 both with the same LN capture time). A lost RGB message therefore only costs that
-one frame and never stalls the stream. Color and camera_info are not re-published;
-downstream consumes `/camera/color/*` directly.
+one frame and never stalls the stream. The RGB image that was used for a frame is
+re-published next to its completed depth, so downstream nodes (filter, nvblox colouring)
+get color, depth and camera_info with one identical stamp and need no pairing of their own.
 
 1. MoGe-2 schätzt metrische Tiefe (mit echter Brennweite aus camera_info).
 2. Globaler Faktor: Median(Messung / MoGe), über die Zeit geglättet.
@@ -57,6 +59,8 @@ COLOR_TOPIC = "/camera/color/image_raw"
 DEPTH_TOPIC = "/camera/depth/image_raw"
 INFO_TOPIC = "/camera/color/camera_info"
 OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
+OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
+OUT_INFO_TOPIC = "/camera/completed/camera_info"
 RGB_BUFFER = 10        # zuletzt empfangene RGB-Bilder, nach Zeitstempel abrufbar (~0.7 s bei 15 Hz)
 
 
@@ -282,6 +286,8 @@ class MoGeDepthCompletion(Node):
         self.create_subscription(CameraInfo, INFO_TOPIC, self.info_cb, qos_profile_sensor_data)
 
         self.pub_depth = self.create_publisher(Image, OUT_DEPTH_TOPIC, 1)
+        self.pub_color = self.create_publisher(Image, OUT_COLOR_TOPIC, 1)
+        self.pub_info = self.create_publisher(CameraInfo, OUT_INFO_TOPIC, 1)
 
     def info_cb(self, msg):
         self.info_msg = msg
@@ -323,8 +329,12 @@ class MoGeDepthCompletion(Node):
             self.latest_depth = None
         return rgb, depth
 
-    def publish(self, depth_mm, header):
+    def publish(self, color_msg, depth_mm, info_msg, header):
+        # Color is the exact RGB image MoGe used (same stamp); camera_info gets that stamp too
+        info_msg.header.stamp = header.stamp
+        self.pub_color.publish(color_msg)
         self.pub_depth.publish(depth_to_msg(depth_mm, header))
+        self.pub_info.publish(info_msg)
 
 
 # ---------------------------------------------------------------- Hauptschleife
@@ -373,7 +383,7 @@ def main():
                 .astype(np.uint16)
             t = tick("Fusion", t)
 
-            node.publish(depth_mm, depth_msg.header)
+            node.publish(color_msg, depth_mm, info_msg, depth_msg.header)
             tick("Publish", t)
 
             n_sum += 1
