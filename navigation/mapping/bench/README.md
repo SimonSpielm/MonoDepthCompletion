@@ -15,11 +15,16 @@ conda create -y -n depthbench python=3.12
 conda run -n depthbench pip install torch numpy opencv-python-headless
 ```
 
-Nur wenn MoGe lokal laufen soll (für `--moge`; lädt beim ersten Lauf ~1,3 GB Gewichte):
+Für lokale Vorhersagen mit **Apple Depth Pro 2** (`--predict depthpro2-s|b|l|h`, `compare_models.py`):
 
 ```bash
-conda run -n depthbench pip install git+https://github.com/microsoft/MoGe.git
+conda run -n depthbench pip install git+https://github.com/apple-aiml-research/ml-depth-pro-2.git
 ```
+
+Die Gewichte lädt das Paket beim ersten Start selbst nach `~/.cache/torch/hub/checkpoints`
+(S 97 MB, B 386 MB, dazu 94 MB FoV-Schätzer). Sie sind nur für nicht-kommerzielle Forschung
+freigegeben (`LICENSE_MODEL` im Repo). MoGe (`--predict moge`) braucht zusätzlich das Paket `moge`,
+das hier bewusst nicht installiert ist.
 
 ## Daten
 
@@ -27,7 +32,7 @@ conda run -n depthbench pip install git+https://github.com/microsoft/MoGe.git
 |---|---|---|
 | `--synthetic N` | wird erzeugt | Boden, schräge Wand, Kisten, dünne Stangen. Sensor ToF-artig (Löcher an Kanten, dunkle Flecken, Reichweitenabfall, Mischpixel), Vorhersage MoGe-artig (weiche Kantenrampen, glatter Skalenfehler). Ground Truth überall bekannt. Schnell, gut für Kantenexperimente. |
 | `--frames F.npz --preds P.npz` | `moge_sweep.py capture` und `infer` auf dem Roboter | echte Szenen. `preds.npz` enthält die MoGe-Vorhersagen, MoGe muss dann lokal nicht laufen. |
-| `--frames F.npz --moge` | wie oben, ohne Vorhersage-Cache | rechnet MoGe lokal (CUDA, Apple MPS oder CPU) und legt `F_preds_<tokens>.npz` an. Nötig für Experimente mit `--num-tokens`. |
+| `--frames F.npz --predict depthpro2-s` | wie oben, ohne Vorhersage-Cache | rechnet das Modell lokal (CUDA, Apple MPS oder CPU) und legt `F_preds_<modell>.npz` an. |
 
 ## Metriken
 
@@ -64,6 +69,23 @@ python depth_bench.py --frames frames.npz --preds preds.npz --set down=8 --csv o
 Mit `--set` und `--sweep` lassen sich alle Parameter von `GradientFusion`
 (`down, lam, mu_near, mu_far, far_band, sigma_edge, z_ref, outlier, iters, tol`) sowie
 `ema` und `edge_rtol` von `fill` setzen.
+
+## Modelle direkt vergleichen
+
+```bash
+python compare_models.py bild.jpg --models depthpro2-s depthpro2-b
+```
+
+```bash
+python compare_models.py --frames frames.npz --index 0
+```
+
+Schreibt `compare_models.png`: RGB, je Modell die Tiefe sowie die Kanten (weiß = harter Sprung,
+orange = weiche Rampe). Dazu Laufzeit und Anteil der Rampen-Pixel. Bei Außenszenen zählt weit
+entfernter, flach gesehener Boden ebenfalls als Rampe; aussagekräftig ist die Kennzahl vor allem
+in Innenräumen.
+
+Gemessen auf einem M4 Pro (MPS): Depth Pro 2 S 130 ms, B 326 ms pro Frame bei 1280×720.
 
 ## Erster Befund (synthetisch, 4 Frames)
 

@@ -11,9 +11,11 @@ Data sources
 ------------
   --frames F.npz    recorded frames (moge_sweep.py capture): rgb (N,H,W,3) uint8,
                     depth (N,H,W) float [m], fov_x (N,)
-  --preds  P.npz    cached MoGe predictions for these frames: pred (N,H,W) [m]
-                    (moge_sweep.py infer, or --moge below). Without it, --moge runs
-                    MoGe locally (CUDA / Apple MPS / CPU) and writes the cache.
+  --preds  P.npz    cached predictions for these frames: pred (N,H,W) [m]
+                    (moge_sweep.py infer, or --predict below)
+  --predict MODEL   run the monocular model locally (CUDA / Apple MPS / CPU) and
+                    cache its predictions: depthpro2-s / -b / -l / -h (Apple Depth
+                    Pro 2) or moge (MoGe-2, production model, needs the moge package)
   --synthetic N     N synthetic scenes (floor, wall, boxes, thin poles) with a
                     ToF-like sensor (holes at edges, dark blobs, range drop-out,
                     flying pixels) and a MoGe-like prediction (soft edge ramps,
@@ -40,7 +42,8 @@ Examples
   python depth_bench.py --synthetic 8
   python depth_bench.py --synthetic 8 --sweep edge_rtol=0,0.03,0.04,0.06 sigma_edge=0.02,0.05
   python depth_bench.py --frames frames.npz --preds preds.npz --set down=8
-  python depth_bench.py --frames frames.npz --moge --num-tokens 2000
+  python depth_bench.py --frames frames.npz --predict depthpro2-s --device mps
+  python depth_bench.py --frames frames.npz --predict depthpro2-b --device mps
 """
 import argparse
 import csv
@@ -56,6 +59,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from depth_fusion import GradientFusion, MoGe, fill  # noqa: E402
+
 
 FUSION_KEYS = ("down", "lam", "mu_near", "mu_far", "far_band", "sigma_edge", "z_ref",
                "outlier", "iters", "tol")
@@ -148,6 +152,44 @@ def synth_frame(rng, H=720, W=1280, fx=610.0, cam_h=0.58):
     return gt, sensor.astype(np.float32), pred
 
 
+# ---------------------------------------------------------------- Modelle
+
+class DepthPro2:
+    """Apple Depth Pro 2 (Paket depth_pro_2), gleiche Schnittstelle wie depth_fusion.MoGe.
+
+    Größen: depthpro2-s (24M), -b (97M), -l (334M), -h (872M). Die Gewichte lädt das Paket beim
+    ersten Start selbst (~/.cache/torch/hub/checkpoints). Jedes Bild wird einzeln gerechnet
+    (model.infer), damit Läufe deterministisch und vergleichbar sind. Nur Forschungslizenz.
+    """
+
+    MAX_DEPTH = 50.0   # [m] darüber (Himmel) gilt als ungültig
+
+    def __init__(self, name="depthpro2-s", device=None):
+        from depth_pro_2 import create_model_and_transforms
+        kw = {} if device is None else {"device": torch.device(device)}
+        self.model, self.transform = create_model_and_transforms(name, **kw)
+        self.model.eval()
+        self.dev = next(self.model.parameters()).device
+
+    @torch.inference_mode()
+    def __call__(self, rgb, fov_x):
+        f_px = None if fov_x is None else 0.5 * rgb.shape[1] / math.tan(math.radians(fov_x) / 2)
+        d = self.model.infer(self.transform(np.ascontiguousarray(rgb)), f_px=f_px)["depth"].float()
+        bad = ~torch.isfinite(d) | (d <= 0) | (d > self.MAX_DEPTH)
+        return torch.where(bad, torch.full_like(d, float("inf")), d)
+
+
+MODELS = ("moge", "depthpro2-s", "depthpro2-b", "depthpro2-l", "depthpro2-h")
+
+
+def make_model(name, num_tokens=1200, device=None):
+    if name == "moge":                       # Produktionsmodell (Paket moge nötig)
+        return MoGe(num_tokens=num_tokens, device=device)
+    if name.startswith("depthpro2-"):
+        return DepthPro2(name, device=device)
+    raise SystemExit(f"unbekanntes Modell '{name}' ({', '.join(MODELS)})")
+
+
 # ---------------------------------------------------------------- Daten laden
 
 def load_recorded(a):
@@ -155,23 +197,24 @@ def load_recorded(a):
     depth = data["depth"].astype(np.float32)
     n = min(len(depth), a.limit) if a.limit else len(depth)
     fov = data["fov_x"].astype(np.float64) if "fov_x" in data else np.full(len(depth), np.nan)
-    preds_path = a.preds or (os.path.splitext(a.frames)[0]
-                             + f"_preds_{a.num_tokens}.npz" if a.moge else None)
+    tag = f"moge{a.num_tokens}" if a.predict == "moge" else a.predict
+    preds_path = a.preds or (os.path.splitext(a.frames)[0] + f"_preds_{tag}.npz"
+                             if a.predict else None)
     if preds_path and os.path.exists(preds_path):
         pred = np.load(preds_path)["pred"][:n].astype(np.float32)
-    elif a.moge:
-        moge = MoGe(num_tokens=a.num_tokens, device=a.moge_device)
-        print(f"MoGe auf {moge.dev}, num_tokens={a.num_tokens} ...")
+    elif a.predict:
+        model = make_model(a.predict, a.num_tokens, a.model_device)
+        print(f"{a.predict} auf {model.dev} ...")
         preds = []
         for i in range(n):
             fx = float(fov[i]) if np.isfinite(fov[i]) else None
-            preds.append(moge(data["rgb"][i], fx).float().cpu().numpy())
+            preds.append(model(data["rgb"][i], fx).float().cpu().numpy())
             print(f"\r  {i + 1}/{n}", end="", flush=True)
         pred = np.stack(preds)
         np.savez(preds_path, pred=pred, fov_x=fov[:n])
         print(f"\n-> Cache {preds_path}")
     else:
-        raise SystemExit("--preds fehlt (oder --moge angeben, um MoGe lokal zu rechnen)")
+        raise SystemExit(f"--preds fehlt (oder --predict {'|'.join(MODELS)}, um lokal zu rechnen)")
     return [(None, depth[i], pred[i]) for i in range(n)]
 
 
@@ -233,9 +276,10 @@ def main():
     src.add_argument("--frames")
     src.add_argument("--synthetic", type=int)
     ap.add_argument("--preds")
-    ap.add_argument("--moge", action="store_true", help="MoGe lokal rechnen (und cachen)")
-    ap.add_argument("--num-tokens", type=int, default=1200)
-    ap.add_argument("--moge-device", default=None, help="cuda / mps / cpu (Standard: automatisch)")
+    ap.add_argument("--predict", choices=MODELS,
+                    help="Modell lokal rechnen (und cachen)")
+    ap.add_argument("--num-tokens", type=int, default=1200, help="nur MoGe")
+    ap.add_argument("--model-device", default=None, help="cuda / mps / cpu (Standard: automatisch)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--device", default="cpu", help="Gerät für die Fusion (cpu / cuda / mps)")
     ap.add_argument("--set", nargs="*", help="feste Parameter, z. B. down=8 edge_rtol=0.03")
