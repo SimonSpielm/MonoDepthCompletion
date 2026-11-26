@@ -47,10 +47,10 @@ conda activate depthcompletion
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-**3. Gemeinsame Pakete**
+**3. Gemeinsame Pakete** (inklusive `rerun-sdk` für den Viewer)
 
 ```bash
-pip install "numpy<2" "opencv-python-headless<4.12" scipy trimesh "huggingface-hub>=1.0" click requests tqdm pillow matplotlib rosbags
+pip install "numpy<2" "opencv-python-headless<4.12" scipy trimesh "huggingface-hub>=1.0" click requests tqdm pillow matplotlib rosbags rerun-sdk
 ```
 
 **4. MoGe**
@@ -85,6 +85,15 @@ python -c "import torch, numpy, rclpy, sensor_msgs.msg; print(torch.cuda.is_avai
 ```bash
 python -c "import sys; sys.path.insert(0, 'navigation/mapping/depth_completion'); from depth_models import load_model; print(load_model('moge2-b', 600).dev)"
 ```
+
+In einem bereits bestehenden Env fehlt für den neuen Viewer nur Rerun:
+
+```bash
+pip install rerun-sdk
+```
+
+Der Viewer öffnet ein eigenes Rerun-Fenster und braucht deshalb einen Bildschirm. Ohne Bildschirm
+(z. B. per SSH) mit `--save f.rrd` aufzeichnen und die Datei später mit `rerun f.rrd` öffnen.
 
 Die Gewichte werden beim ersten Start geladen (`~/.cache/huggingface`,
 `~/.cache/torch/hub/checkpoints`). Im LN-Prozessmanager das Env-Python direkt eintragen
@@ -273,7 +282,7 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 | `depth_models.py` | Modelle, `load_model(name)` |
 | `depth_fusion.py` | `fill` (Schritte 1–3), `GradientFusion`, `ramp_mask`, `supported` |
 | `depth_completion_node.py` | ROS-Knoten (Schritt 3 der Pipeline) |
-| `viewer.py` | Live-Anzeige an der Kamera; verworfene Pixel magenta, Filter mit `--set ramp_dmin=0 support_px=0` abschaltbar |
+| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte orange, Filter mit `--set ramp_dmin=0 support_px=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
 | `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
 
 ```bash

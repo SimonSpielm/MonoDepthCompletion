@@ -99,11 +99,12 @@ Schritt 6 wird nicht gestartet, sondern von `Arm_Collision_Model` instanziiert.
 
 ## Dev-Viewer
 
-`depth_completion/viewer.py` zeigt RGB | Sensortiefe | gefüllte Tiefe live und rechnet dabei genau den
-Code von Schritt 3 (`depth_models` + `depth_fusion.fill`). Nicht Teil der Produktivkette: Er
-abonniert die rohen Bridge-Topics, publisht nichts und kann parallel zur Pipeline laufen
-(eigenes Modell im GPU-Speicher). Vom Kantenfilter verworfene Pixel sind magenta, Taste `e`
-schaltet die Fehlerauswertung unter 3 m an/aus.
+`depth_completion/viewer.py` zeigt in einem Rerun-Fenster oben RGB, Sensortiefe, Modelltiefe und
+gemergte Tiefe, darunter die 3D-Punktwolke jeder dieser Tiefen (mit der Maus drehbar). Er rechnet
+genau den Code von Schritt 3 (`depth_models` + `depth_fusion.fill`). Nicht Teil der
+Produktivkette: Er abonniert die rohen Bridge-Topics, publisht nichts und kann parallel zur
+Pipeline laufen (eigenes Modell im GPU-Speicher). Mit `--frames f.npz` spielt er stattdessen eine
+Aufnahme ohne ROS ab, mit `--eval` zeigt er zusätzlich den Fehler unter 3 m als Kurve über die Zeit.
 
 ```bash
 python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-tokens 600
@@ -111,6 +112,10 @@ python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-token
 
 ```bash
 python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --stream
+```
+
+```bash
+python navigation/mapping/depth_completion/viewer.py --frames aufnahme.npz
 ```
 
 ```bash
