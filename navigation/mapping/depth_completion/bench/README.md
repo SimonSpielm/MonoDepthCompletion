@@ -107,8 +107,11 @@ bei `rosbag`). Fehler unter 3 m.
 | alter 3×3-Kantenfilter (Depth Pro 2 S) | 0,86 % | – | – | 3,95 % | 68 % | – | – |
 | Fusion + Ebenenabstand + Stützprüfung (bis Nov. 2026) | 0,40 % | 3,06 % | 87 / 89 % | 0,00 % | 2 % | 1,49 % | 24 |
 | einfach: geglätteter Korrekturfaktor + Kantentest | 0,33–0,35 % | 5,7–7,7 % | 52–67 / 45–60 % | 0,15–0,64 % | 3–24 % | 1,31 % | 4 |
-| **Fusion + Kantentest 1/Tiefe (Standard)** | **0,30 %** | **2,07 %** | 81 / 82 % | **0,00 %** | **19 %** | 1,29 % | 13 |
+| Fusion + Kantentest 1/Tiefe, Zone 8 px | 0,30 % | 2,07 % | 81 / 82 % | 0,00 % | 19 % | 1,29 % | 22 |
+| **Fusion + Kantentest 1/Tiefe, Zone 4 px (Standard)** | 0,36 % | 2,40 % | **85 / 86 %** | 0,04 % | **21 %** | 1,36 % | 22 |
 
+- Zone 4 px statt 8 px: 66 % statt 59 % der echten Sensorlöcher werden gefüllt, dafür bleibt ein
+  kleiner Rest Kanten-Bleeding (0,04 %, unter 3 m 0,01 %) und der Fehler steigt leicht.
 - Das einfache Verfahren mittelt den Korrekturfaktor über Kanten hinweg und hat in großen
   Löchern keine Führung entlang der Flächen; deshalb bleibt die Fusion.
 - Der Kantentest misst den Sprung in 1/Tiefe statt in der Tiefe: Im relativen Tiefensprung galt
@@ -124,7 +127,7 @@ bei `rosbag`). Fehler unter 3 m.
 
 Gemessen noch mit dem früheren Kantenfilter (Ebenenabstand + Stützprüfung) und nicht neu
 gerechnet; mit dem aktuellen Filter für MoGe-2 B siehe oben. Die Laufzeiten enthalten die
-damalige Füllung (24 ms), die aktuelle braucht 13 ms.
+damalige Füllung (24 ms), die aktuelle braucht mit echten Vorhersagen ohne Warmstart 22 ms.
 
 Modelle, Laufzeit auf M4 Pro (MPS, 1280×720, Modell + Füllung mit 40 CG-Iterationen), Fehler und
 Bleeding unter 3 m:

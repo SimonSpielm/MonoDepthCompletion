@@ -20,8 +20,9 @@ instead of opening the window (open it later with `rerun f.rrd`).
 
 Model depth = model prediction times the global scale. Merged depth = measurement where the
 sensor measured, filled holes elsewhere; pixels discarded by the edge filter are magenta. In
-the merged cloud, measured points have their RGB colour and filled points are orange; both can
-be toggled separately in the Rerun entity tree (cloud/merged/measured, cloud/merged/filled).
+the merged cloud, all points have their RGB colour; --mark-filled draws the filled points in
+orange instead. Measured and filled points can be toggled separately in the Rerun entity tree
+(cloud/merged/measured, cloud/merged/filled).
 
 --eval adds the error below 3 m as curves over time (AbsRel [%], MAE [cm]). For that, random
 32 px blocks of measured pixels are hidden, filled and compared with the measurement; this
@@ -171,6 +172,7 @@ def main():
     ap.add_argument("--eval", action="store_true", help="error below 3 m on hidden blocks (costs a second fill)")
     ap.add_argument("--stride", type=int, default=3, help="every n-th pixel in the point clouds")
     ap.add_argument("--max-depth", type=float, default=8.0, help="[m] range of colours and clouds")
+    ap.add_argument("--mark-filled", action="store_true", help="draw filled points orange instead of RGB")
     ap.add_argument("--color", default="/camera/color/image_raw")
     ap.add_argument("--depth", default="/camera/depth/image_raw")
     ap.add_argument("--info", default="/camera/color/camera_info")
@@ -216,8 +218,8 @@ def main():
         for name, d in (("sensor", depth), ("model", est), ("merged/measured", np.where(measured, filled, 0))):
             pts, col = bp(d)
             rr.log(f"cloud/{name}", rr.Points3D(pts, colors=col, radii=-1.5))
-        pts, _ = bp(np.where(measured, 0, filled))
-        rr.log("cloud/merged/filled", rr.Points3D(pts, colors=FILLED_COLOR, radii=-1.5))
+        pts, col = bp(np.where(measured, 0, filled))
+        rr.log("cloud/merged/filled", rr.Points3D(pts, colors=FILLED_COLOR if a.mark_filled else col, radii=-1.5))
 
         if a.eval:
             e = holdout_error(depth, d_t, pred, fusion_kw, fill_kw, log_s, rng)

@@ -159,7 +159,8 @@ zwischen Vorder- und Hintergrund in der Karte. `depth_fusion.fill` findet deshal
 geschätzten Tiefe (Sprung in 1/Tiefe > `edge_jump`), bläht sie um `edge_grow` Pixel auf und füllt
 dort nichts (gemessene Pixel bleiben immer; fliegende Pixel in der Messung entfernt Schritt 4).
 1/Tiefe statt Tiefe, weil der flach gesehene Boden darin in jeder Entfernung gleich steil ist und
-nicht als Kante gilt. Auf 6 Aufnahmen bleibt das Kanten-Bleeding damit bei 0 %, und der Filter
+nicht als Kante gilt. Auf 6 Aufnahmen sinkt das Kanten-Bleeding damit von 32 % auf 0,04 %
+(mit `edge_grow=8` auf 0 %, bei weniger gefüllter Fläche), und der Filter
 ersetzt zwei frühere, schwer verständliche Tests (Ebenenabstand und Stützprüfung) bei besserer
 Genauigkeit (Details: `depth_completion/bench/README.md`).
 

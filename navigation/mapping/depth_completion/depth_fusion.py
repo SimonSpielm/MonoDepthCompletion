@@ -213,7 +213,7 @@ def jump_edges(est, edge_jump, edge_grow, w=5):
 
 
 @torch.inference_mode()
-def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, edge_jump=0.015, edge_grow=8):
+def fill(depth_m, pred, fusion, prev_log_s=None, ema=0.3, edge_jump=0.015, edge_grow=4):
     """Fills the holes of depth_m. Returns (completed [m], log_s); 0 = empty.
 
     depth_m: sensor depth [m], 0 = hole. pred: model depth [m], inf = invalid. Both torch

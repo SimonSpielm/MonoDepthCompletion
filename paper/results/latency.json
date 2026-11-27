@@ -1,0 +1,43 @@
+{
+ "moge2-s600": {
+  "model_ms": 60,
+  "fill_ms": 22,
+  "total_ms": 82
+ },
+ "moge2-s1200": {
+  "model_ms": 107,
+  "fill_ms": 22,
+  "total_ms": 129
+ },
+ "moge2-b600": {
+  "model_ms": 85,
+  "fill_ms": 22,
+  "total_ms": 107
+ },
+ "moge2-b1200": {
+  "model_ms": 157,
+  "fill_ms": 22,
+  "total_ms": 179
+ },
+ "moge1200": {
+  "model_ms": 286,
+  "fill_ms": 22,
+  "total_ms": 308
+ },
+ "depthpro2-s": {
+  "model_ms": 129,
+  "fill_ms": 22,
+  "total_ms": 151
+ },
+ "depthpro2-b": {
+  "model_ms": 323,
+  "fill_ms": 22,
+  "total_ms": 345
+ },
+ "depthpro2-l": {
+  "model_ms": 986,
+  "fill_ms": 23,
+  "total_ms": 1009
+ },
+ "_note": "Apple M4 Pro, Metal backend, 1280x720, median of 5 after warm-up, bench/speed.py; fill without warm start"
+}

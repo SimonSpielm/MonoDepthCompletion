@@ -115,7 +115,7 @@ Eine Aufnahme aus dem Labor (MoGe-2 B, 600 Tokens):
    jenseits der Reichweite, dazu Löcher an den Rollstühlen und an Kanten.
 3. **Modell × globaler Faktor**: Die Schätzung deckt das ganze Bild ab, Kanten sind weich.
 4. **Gefüllt**: Messung plus gefüllte Löcher. Magenta sind die Pixel, die der Kantenfilter
-   verworfen hat, sie bleiben leer. Hier sind 92 % des Bildes gefüllt, 8 % verworfen.
+   verworfen hat, sie bleiben leer. Hier sind 95 % des Bildes gefüllt, 5 % verworfen.
 
 ## Tiefenschätzung: welche Modelle es gibt
 
@@ -234,7 +234,7 @@ füllen.**
 1. **Kante finden**: In der korrigierten Modelltiefe wird für jedes Pixel geschaut, wie stark
    sich 1/Tiefe im 5×5-Fenster ändert. Springt sie um mehr als `edge_jump` (0,015 1/m), liegt
    dort eine Kante. Der Sprung von 1,5 m auf 3 m ist in 1/Tiefe 0,67 → 0,33, also weit darüber.
-2. **Zone**: Die Kante wird um `edge_grow` (8 px) aufgebläht, damit auch die flachen Enden der
+2. **Zone**: Die Kante wird um `edge_grow` (4 px) aufgebläht, damit auch die flachen Enden der
    Rampe dazugehören.
 3. **Nicht füllen**: Gefüllte Pixel in der Zone werden verworfen und bleiben leer. Gemessene
    Pixel bleiben immer.
@@ -258,7 +258,9 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 **Grenzen**
 
 - In der Zone um Kanten bleibt die Tiefe leer. Von den Löchern direkt an Tiefenkanten wird etwa
-  ein Fünftel gefüllt, dafür ohne Fehler.
+  ein Fünftel gefüllt (21 %). Ein kleiner Rest bleibt: 0,04 % der Kantenpixel werden noch
+  mit mehr als 10 % Fehler gefüllt. Mit `edge_grow=8` sind es 0 %, dafür werden 7 Prozentpunkte
+  weniger der echten Löcher gefüllt.
 - Sehr nahe Flächen, auf die man fast genau von der Seite schaut (z. B. eine Wand, an der der
   Roboter in weniger als ~0,5 m Abstand entlangfährt), ändern sich in 1/Tiefe ebenfalls stark
   und werden als Kante verworfen. Links in der Draufsicht fällt eine schräg gesehene Fläche weg,
@@ -267,7 +269,7 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 | Parameter | Standard | Bedeutung |
 |---|---|---|
 | `edge_jump` | 0.015 1/m | ab welchem Sprung in 1/Tiefe (im 5×5-Fenster) eine Kante vorliegt, 0 = Filter aus |
-| `edge_grow` | 8 px | Breite der Zone um eine Kante, in der nichts gefüllt wird |
+| `edge_grow` | 4 px | Breite der Zone um eine Kante, in der nichts gefüllt wird (8 px: kein Bleeding mehr, aber weniger Fläche) |
 
 ## Code und Werkzeuge
 
@@ -276,7 +278,7 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 | `depth_models.py` | Modelle, `load_model(name)` |
 | `depth_fusion.py` | `fill` (Schritte 1–3), `global_scale`, `GradientFusion`, `jump_edges` |
 | `depth_completion_node.py` | ROS-Knoten (Schritt 3 der Pipeline) |
-| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte orange, Filter mit `--set edge_jump=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
+| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte in RGB (mit `--mark-filled` orange), Filter mit `--set edge_jump=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
 | `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
 
 ```bash

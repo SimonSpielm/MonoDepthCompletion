@@ -88,23 +88,25 @@ Time-of-flight (ToF) RGB-D cameras miss a large fraction of the depth image on
 dark, glossy and transparent surfaces and at depth discontinuities. In a
 volumetric map these holes become unobserved space, which practical collision
 checkers treat as free. We present the perception-to-mapping pipeline of a
-wheelchair-based assistive manipulator that fills these holes with the metric
-monocular geometry model MoGe-2, removes the robot arm and nearby humans, and
-accumulates the result over time in an nvblox TSDF. The core of the pipeline
-is the alignment of the monocular prediction to the sensor. We compare a
-closed-form local affine alignment with a variational log-depth correction
-that is edge-aware, weights each measurement by its reliability, and decays
-smoothly away from the measurements. After deterministic tuning on held-out
-sensor measurements, both reduce the error of global scale alignment by a
-factor of about four (\(2.75\,\%\) and \(3.27\,\%\) AbsRel versus
-\(12.8\,\%\)). The local alignment wins this benchmark, but its support is
-limited to a window around the measurements. Inside large or one-sided holes
-it falls back to the global scale and changes between frames. The variational
-correction is continuous by construction. We therefore argue that holdout
-accuracy alone is the wrong criterion for a filler whose output is accumulated
-in a map, and we evaluate both alignments on large holes, temporal stability
-and map quality across scenes. \todo{headline numbers of the stability and
-map-level evaluation}
+wheelchair-based assistive manipulator that fills these holes with a metric
+monocular depth model, removes the robot arm and nearby humans, and
+accumulates the result in an nvblox TSDF. The completion has three stages: a
+median global scale, a variational log-depth correction that is edge-aware and
+decays smoothly away from the measurements, and an edge filter that detects
+jumps in inverse depth and leaves the smeared depth edges of the prediction
+unfilled. On six static recordings, the variational correction is \(2.7\)
+times more accurate than a local alignment inside \(128\,\)px holes (\(1.74\)
+versus \(4.64\,\%\) AbsRel below \(3\,\)m), although the local alignment is
+close on small holes (\(0.58\) versus \(0.44\,\%\)). Without edge handling,
+\(32\,\%\) of the fills next to depth edges are wrong by more than \(10\,\%\);
+the edge filter reduces this to \(0.04\,\%\) with two geometric parameters.
+Under the same completion, MoGe-2 and Depth Pro~2 are similarly accurate next
+to measurements (\(0.35\)--\(0.45\,\%\)), while inside large holes the error
+falls from \(2.0\) to \(1.05\,\%\) with model size and latency, and Depth Pro~2
+leaves two to five times fewer gross errors there; MoGe-2 ViT-B is the most
+accurate model at \(8\,\)Hz on our test hardware. The completed depth changes by
+\(1.4\,\%\) between frames of a static scene, which it inherits from the
+per-frame prediction. \todo{map-level result, one sentence}
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -167,14 +169,20 @@ its depth edges. Its data term weights each measurement by coverage, sensor
 noise and edge proximity. Its decay term returns the correction to the global
 scale over a length scale of several hundred pixels. The solution is unique
 and depends continuously on the measurements, so it changes little when the
-set of valid pixels changes.
+set of valid pixels changes. A third stage removes the smeared depth edges of
+the prediction, which would otherwise appear as points between foreground and
+background, by detecting jumps in inverse depth. The monocular model is
+exchangeable; we compare MoGe-2 and Depth Pro~2~\cite{hu2026depthpro2} under
+the same completion.
 
 % Block D: experiment teaser
-On held-out sensor measurements, both variants reduce the error of the global
-scale by a factor of about four. The local variant is more accurate on small
-held-out blocks (\(2.75\) vs.\ \(3.27\,\%\) AbsRel), but its advantage shrinks
-from \(0.9\) to \(0.25\) percentage points as the blocks grow from \(16\) to
-\(64\,\)px. \todo{large-hole, temporal and map-level results, one sentence}
+On held-out sensor measurements of a tuning recording, both variants reduce the
+error of the global scale by a factor of about four, and the local variant is
+more accurate on small blocks (\(2.75\) vs.\ \(3.27\,\%\) AbsRel). On six
+recordings, this ranking reverses for large holes: inside \(128\,\)px blocks
+the variational alignment is \(2.7\) times more accurate (\(1.74\) vs.\
+\(4.64\,\%\) below \(3\,\)m). The edge filter reduces the fills with more than
+\(10\,\%\) error next to depth edges from \(32\) to \(0.04\,\%\). \todo{map-level result, one sentence}
 
 % Block E: contributions
 Our contributions are:
@@ -186,13 +194,16 @@ Our contributions are:
         (Secs.~\ref{sec:system} and~\ref{sec:filtermap}).
   \item A variational log-depth alignment of a monocular prediction to sensor
         depth that preserves every measurement, does not propagate across
-        predicted depth edges, and decays smoothly into large holes, with a
-        GPU implementation (Sec.~\ref{sec:filler}, Table~\ref{tab:runtime}).
-        \todo{state the rate once the GPU timing is measured}
-  \item An evaluation that compares local and variational alignment on
-        held-out measurements, large and one-sided holes, temporal stability
-        and map quality across scenes. It shows that holdout accuracy favours
-        local alignment while stability favours the variational one
+        predicted depth edges, and decays smoothly into large holes, followed
+        by an edge filter in inverse depth that removes the smeared depth
+        edges of the prediction; both run on the GPU in \(22\,\)ms per frame on
+        an Apple M4 Pro (Sec.~\ref{sec:filler}).
+  \item An evaluation on six recordings that compares local and variational
+        alignment, four forms of edge handling, and eight configurations of
+        MoGe-2 and Depth Pro~2 in accuracy on small and large holes, bleeding
+        at depth edges, temporal flicker and latency. It shows that small
+        held-out blocks favour local alignment, large holes the variational
+        one, and that the model choice matters mainly inside large holes
         (Secs.~\ref{sec:results} and~\ref{sec:analysis}).
 \end{enumerate}
 
@@ -214,7 +225,9 @@ extends the point-map model MoGe~\cite{wang2025moge} to metric scale and is
 refined further by MoGe-3~\cite{kong2026moge3} (Sec.~\ref{sec:bg-moge}). Even
 metric predictions need alignment before they can replace sensor depth. We use
 MoGe-2 because it accepts the known field of view, outputs a validity mask, is
-MIT-licensed, and runs in \(40\,\)ms on our GPU. PointDiT~\cite{xu2026pointdit}
+MIT-licensed, and offers small backbones that reach our target rate. Depth
+Pro~2~\cite{hu2026depthpro2}, the successor of Depth Pro, is more accurate in our
+comparison but slower and licensed for research only. PointDiT~\cite{xu2026pointdit}
 was not considered because its DINOv3 backbone~\cite{simeoni2025dinov3}
 requires an access request under a custom licence.
 
@@ -368,10 +381,17 @@ authors name flying points at object boundaries as a remaining limitation.
 single factor predicted from image content, with about \(15\,\%\) error. The
 prediction must therefore be aligned to the sensor before it can fill holes,
 and MoGe-3 does not remove this need. Its local shape is more reliable than its
-absolute position, which is the assumption behind Stage~2 of our filler. We
-deploy MoGe-2 for its latency (\(40\,\)ms, Table~\ref{tab:runtime}); MoGe-3 is a
-drop-in replacement at about three times the network cost.
-\todo{measure MoGe-3 latency and holdout accuracy on the robot cache}
+absolute position, which is the assumption behind Stage~2 of our filler.
+MoGe-3 is a drop-in replacement at about three times the network cost of
+MoGe-2; its refinement stage requires CUDA, so it is not part of the
+multi-scene comparison, which ran on an Apple GPU (Sec.~\ref{sec:setup}).
+
+\textbf{Depth Pro 2.} Depth Pro~2~\cite{hu2026depthpro2} predicts metric depth
+at the full input resolution and, given the focal length, needs no
+field-of-view estimate. It is designed for sharp depth edges and offers a
+streaming mode that attends to previous frames for temporal consistency. We
+compare it with MoGe-2 as the source of the prediction \(\Dp\)
+(Sec.~\ref{sec:res-model}).
 
 \subsection{nvblox: GPU-Accelerated TSDF Mapping}
 \label{sec:bg-nvblox}
@@ -1042,8 +1062,9 @@ The filler maps a colour image and a depth image with holes to a completed
 depth image. It keeps every measurement and fills the remaining pixels with an
 aligned monocular prediction. Sec.~\ref{sec:formulation} defines the problem.
 Secs.~\ref{sec:prior}--\ref{sec:global} describe the prediction and its global
-scale, and Secs.~\ref{sec:affine}--\ref{sec:fusion} the two local alignments.
-Algorithm~\ref{alg:filler} summarises one frame.
+scale, Secs.~\ref{sec:affine}--\ref{sec:fusion} the two local alignments, and
+Sec.~\ref{sec:edgefilter} the edge filter that removes the smeared depth edges
+of the prediction. Algorithm~\ref{alg:filler} summarises one frame.
 
 \begin{figure}[t]
 \centering
@@ -1116,12 +1137,23 @@ depth edges, and behave predictably far from any measurement.
 
 \subsection{Monocular Prediction}
 \label{sec:prior}
-MoGe-2 with a ViT-L backbone runs in half precision with \(1200\) image
-tokens. The horizontal field of view is computed from the intrinsics,
-\(\mathrm{FoV}_x=2\arctan\big(W/(2f_x)\big)\), and passed to the model. This
-removes the focal-length ambiguity of monocular reconstruction. The remaining
-error is a scale error and low-frequency shape distortion. Pixels outside the
-model's validity mask are set to \(\Dp=\infty\).
+The filler accepts any metric monocular model behind one interface, which maps
+an RGB image and the horizontal field of view
+\(\mathrm{FoV}_x=2\arctan\big(W/(2f_x)\big)\) to a depth image
+\(\Dp\) at full resolution. We support MoGe-2~\cite{wang2025moge2} with ViT-S,
+ViT-B and ViT-L backbones, MoGe-3~\cite{kong2026moge3}, and Depth
+Pro~2~\cite{hu2026depthpro2} in sizes S, B, L and H. MoGe receives
+\(\mathrm{FoV}_x\) directly and a number of image tokens that trades detail
+against latency. Depth Pro~2 receives the equivalent focal length \(f_x\) in
+pixels, which skips its field-of-view estimator. With the true intrinsics, both
+families predict metric depth, so the remaining error is a scale error and a
+low-frequency shape distortion. Pixels outside the model's validity mask or
+predicted beyond \(50\,\)m are set to \(\Dp=\infty\).
+
+The deployed model is MoGe-2 ViT-B with \(600\) tokens. It is the most accurate
+configuration that reaches the target rate of \(8\,\)Hz together with the
+completion (Sec.~\ref{sec:res-model}). Depth Pro~2 is a drop-in alternative; its
+weights are licensed for research use only.
 
 \subsection{Stage 1: Global Scale}
 \label{sec:global}
@@ -1221,16 +1253,18 @@ positive-definite system
 \end{equation}
 with the weighted graph Laplacian \(L_\lambda\). We solve it matrix-free with
 Jacobi-preconditioned conjugate gradients~\cite{hestenes1952cg} (at most
-\(80\) iterations, relative tolerance \(10^{-4}\)), warm-started from the
+\(40\) iterations, relative tolerance \(10^{-4}\), tested every \(10\)
+iterations because each test synchronises the GPU), warm-started from the
 previous frame. One iteratively reweighted step~\cite{holland1977irls} with
 Huber weights \(w_i'=w_i\min\!\big(1,\tau/|r_i-c_i|\big)\) follows.
 
-\textbf{Edge-aware upsampling.} The coarse field is upsampled to half
-resolution bilinearly, with each of the four coarse neighbours \(j\) further
+\textbf{Edge-aware upsampling.} The coarse field is upsampled directly to full
+resolution, bilinearly, with each of the four coarse neighbours \(j\) further
 weighted by \(\big(1+((\log\Dp_s(p)-g_j)/\sigma_e)^2\big)^{-1}\), so that grid
-points on a different surface contribute little. The last step to full
-resolution is bilinear. The output on \(\mathcal{V}\setminus\Om\) is
-\(\Dp_s\exp(c)\).
+points on a different surface contribute little. An earlier version upsampled
+to half resolution and finished with a plain bilinear step, which smeared
+\(c\) across object edges. The aligned prediction is
+\(\Dp_a=\Dp_s\exp(c)\).
 
 \textbf{Advantages.} Eq.~\eqref{eq:energy} is a screened Poisson problem on an
 image-adaptive graph, related to colorization by
@@ -1239,13 +1273,79 @@ editing~\cite{perez2003poisson} and the bilateral
 solver~\cite{barron2016bilateral}. Three properties follow. First, inside a
 hole (\(w=0\)) the solution satisfies \((L_\lambda+\mu)c=0\), so the border
 correction decays exponentially with length \(\ell=\sqrt{\lambda/\mu}\) cells.
-For the tuned parameters (Table~\ref{tab:params}),
-\(\ell_{\mathrm{near}}=100\) cells (\(\approx\!400\,\)px) within the measured
-range and \(\ell_{\mathrm{far}}\approx14\) cells (\(\approx\!57\,\)px) beyond
+For the final parameters (Table~\ref{tab:params}),
+\(\ell_{\mathrm{near}}=100\) cells (\(\approx\!200\,\)px) within the measured
+range and \(\ell_{\mathrm{far}}\approx14\) cells (\(\approx\!28\,\)px) beyond
 it. Second, the energy is strictly convex, so \(c\) is unique and depends
 continuously on the data: a small change of the measured set between frames
 changes \(c\) by a small amount. Third, the edge-aware weights confine each
 correction to the surface it was measured on.
+
+\subsection{Stage 3: Edge Filter}
+\label{sec:edgefilter}
+Monocular models draw a depth discontinuity as a smooth ramp over \(10\) to
+\(30\,\)px. The ToF camera often has no measurement exactly there
+(Table~\ref{tab:tofweak}), so the completion fills the ramp. A pixel on the
+ramp between an object at \(1.5\,\)m and a wall at \(3\,\)m receives, for
+example, \(2.2\,\)m: a point in free space between both surfaces. Integrated
+over frames, these points form comet tails behind every object
+(Fig.~\ref{fig:clouds}). Stage~2 cannot remove them, because they lie on the
+predicted surface along which the correction is propagated.
+
+\textbf{Design.} Stage~3 detects depth edges in the aligned prediction and
+leaves the pixels around them unfilled. Concretely, with \(q=1/\Dp_a\), the
+edge set is
+\begin{equation}
+  \mathcal{E}=\Big\{p:\ \max_{p'\in N_5(p)} q(p')-\min_{p'\in N_5(p)} q(p')>\kappa\Big\},
+  \label{eq:edges}
+\end{equation}
+where \(N_5(p)\) is the \(5{\times}5\) window around \(p\). The edge set is
+dilated by \(\gamma\) pixels to the zone \(\mathcal{Z}=\mathcal{E}\oplus
+B_\gamma\), and filled pixels in the zone are discarded. The completed depth
+of Eq.~\eqref{eq:fill} becomes
+\begin{equation}
+  \hat \Dm(p) =
+  \begin{cases}
+    \Dm(p) & p\in\Om,\\
+    \Dp_a(p) & p\in\mathcal{V}\setminus(\Om\cup\mathcal{Z}),\\
+    0 & \text{otherwise},
+  \end{cases}
+  \label{eq:fillfinal}
+\end{equation}
+with \(\kappa=0.015\,\)m\(^{-1}\) and \(\gamma=4\,\)px. Measured pixels are
+never removed. Fig.~\ref{fig:edgefilter} shows the filter along one image row.
+
+\textbf{Why inverse depth.} A plane \(n^\top X=d\) seen by a pinhole camera has
+\(1/z=(n_xx+n_yy+n_z)/d\) with \(x=(u-c_x)/f\), \(y=(v-c_y)/f\), which is affine
+in the pixel coordinates. Its range in a \(5{\times}5\) window is at most
+\(4/(fd)\) and independent of the distance along the ray. The floor, at the
+camera height \(h=0.58\,\)m, yields \(4/(fh)\approx0.011\,\)m\(^{-1}\) for
+\(f=607\,\)px at every distance and stays below \(\kappa\). A test on the relative
+range of depth instead marks the floor as an edge beyond about \(2\,\)m, because
+the depth of a receding plane grows quadratically along the image column. In
+inverse depth, the threshold \(\kappa\) is equivalent to rejecting planes closer
+than \(d_{\min}=4/(f\kappa)\approx0.44\,\)m to the camera centre. A smeared
+depth edge is such a plane: extended, it passes almost through the camera, and
+the jump from \(1.5\) to \(3\,\)m is \(0.33\,\)m\(^{-1}\).
+
+\textbf{Advantages.} The filter needs no camera height, no focal length at run
+time and no access to the measurements, and its two parameters have a
+geometric meaning. It replaced two earlier tests, a per-pixel plane-distance
+test and a check of each fill against the near and far measurements in its
+neighbourhood, which needed four parameters and left most of the edge band
+unfilled (Sec.~\ref{sec:res-edges}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/edge_filter.pdf}
+\caption{Edge filter along one image row with an object at \(1.5\,\)m in front of
+a wall at \(3\,\)m (synthetic profile). Top: the aligned prediction draws the
+discontinuity as a ramp; the sensor hole (grey) would be filled with depths
+between both surfaces. Bottom: range of \(1/z\) in a \(5\)-pixel window. Where it
+exceeds \(\kappa\), an edge is detected; the edge dilated by \(\gamma=4\,\)px is the
+zone (orange) in which nothing is filled.}
+\label{fig:edgefilter}
+\end{figure}
 
 \begin{algorithm}[t]
 \caption{Depth filler, one frame (Variant~B)}
@@ -1259,21 +1359,25 @@ correction to the surface it was measured on.
 \State \(w,\lambda_{ij},\mu \gets\) weights \Comment{Eq.~\eqref{eq:wdata}}
 \State \(c \gets \textsc{Pcg}\big(\mathrm{diag}(w+\mu)+L_\lambda,\; w\odot r,\; c_{t-1}\big)\) \Comment{Eq.~\eqref{eq:linsys}}
 \State \(w \gets w\min(1,\tau/|r-c|)\); \(c\gets\textsc{Pcg}(\cdot,\cdot,c)\) \Comment{IRLS step}
-\State \(c\gets \textsc{EdgeAwareUpsample}(c, \log\Dp_s)\)
-\State \(\hat\Dm \gets \Dm\) on \(\Om\); \(\Dp_s e^{c}\) on \(\mathcal{V}\setminus\Om\); \(0\) else \Comment{Eq.~\eqref{eq:fill}}
+\State \(c\gets \textsc{EdgeAwareUpsample}(c, \log\Dp_s)\); \(\Dp_a\gets\Dp_s e^{c}\)
+\State \(\mathcal{Z}\gets\textsc{Dilate}_\gamma\big(\{p: \mathrm{range}_{5\times5}(1/\Dp_a)>\kappa\}\big)\) \Comment{Eq.~\eqref{eq:edges}}
+\State \(\hat\Dm \gets \Dm\) on \(\Om\); \(\Dp_a\) on \(\mathcal{V}\setminus(\Om\cup\mathcal{Z})\); \(0\) else \Comment{Eq.~\eqref{eq:fillfinal}}
 \State \Return \(\hat\Dm\), \(\bar s_t\), \(c_t\gets c\)
 \end{algorithmic}
 \end{algorithm}
 
 \subsection{Implementation}
-The deployed filler runs Variant~B in PyTorch on the GPU. Block statistics
-use average pooling, the CG operator uses shifted tensor slices, and the
-upsampling index tables are cached. The prediction stays in GPU memory between
-MoGe and the fusion. The node subscribes to the raw colour, depth and
-intrinsics, synchronises them by their identical stamp, and publishes the
-completed depth as 16-bit millimetres under the input header, so measured
-pixels pass through bit-exactly. NumPy/OpenCV implementations of both variants
-with the same arithmetic are used for tuning and evaluation.
+The deployed filler runs Variant~B and the edge filter in PyTorch on the GPU,
+on CUDA or on Apple's Metal backend. Block statistics use average pooling, the
+CG operator uses shifted tensor slices, the edge filter uses max pooling, and
+the upsampling index tables are cached. The prediction stays in GPU memory
+between the model and the fusion. The node is triggered by the depth image,
+looks up the colour image with the identical stamp, and publishes the
+completed depth as 16-bit millimetres under the input header together with the
+colour image and intrinsics, so measured pixels pass through bit-exactly. The
+same code runs in an offline benchmark on recorded frames and in a viewer that
+shows the sensor, predicted and completed depth and their point clouds side by
+side (Fig.~\ref{fig:clouds}).
 
 % =========================================================================
 \section{Filtering and Volumetric Mapping}
@@ -1327,6 +1431,13 @@ closed. Unobserved voxels (weight \(0\)) are free. The occupied voxels form a
 \section{Experimental Setup}
 \label{sec:setup}
 
+The evaluation has two parts. A tuning study on one recording selected the
+alignment and tuned both variants with MoGe-2 ViT-L. A multi-scene evaluation
+on six recordings then compared the monocular models, the edge handling and the
+temporal behaviour with the deployed code.
+
+\subsection{Tuning Study}
+
 \textbf{Compared variants.} We compare raw sensor depth, Stage~1 only
 (global scale), Variant~A and Variant~B, all with the same MoGe-2 prediction.
 
@@ -1346,13 +1457,11 @@ Metrics are AbsRel \(=\mathrm{mean}|\hat \Dm-\Dm|/\Dm\), MAE, RMSE,
 \(\delta_1\) (fraction with \(\max(\hat \Dm/\Dm,\Dm/\hat \Dm)<1.25\)), and
 AbsRel per distance bin.
 
-\textbf{Parameter sweeps.} Variant~A was tuned in three rounds over about
-\(530\) configurations (radius \(r\), \(\varepsilon\), downsampling \(d\),
-clip range, range gating, \(\rho\), \(\alpha\), and two structural
-alternatives). Variant~B was tuned in four stages over about \(270\)
-configurations (\(f\), \(\lambda\), \(\sigma_e\), \(z_{\mathrm{ref}}\),
-\(\tau\), \(\mu_{\mathrm{near}}\), \(\mu_{\mathrm{far}}\), \(\beta\)).
-Table~\ref{tab:params} lists the result.
+\textbf{Parameter tuning.} Both variants were tuned by grid search on the
+holdout protocol, selecting the configuration with the lowest AbsRel over all
+block sizes: \(536\) configurations for Variant~A in three rounds and \(188\)
+for Variant~B in four stages. Table~\ref{tab:params} lists the searched values
+and the result.
 
 \textbf{Large holes and stability.} On the same cache we hide
 \(96\)--\(256\,\)px blocks, and we grow real holes of at least \(400\,\)px by a
@@ -1379,39 +1488,112 @@ space), missed-unknown obstacles (reference obstacles left unobserved, i.e.\
 free for the planner), the voxel flip rate in the static part, and \(t_{90}\),
 the time to reach \(90\,\%\) of final completeness.
 
-\textbf{Hardware.} All timings are on an NVIDIA RTX A6000.
+\textbf{Hardware.} Timings of the tuning study are on an NVIDIA RTX A6000.
+
+\subsection{Multi-Scene Evaluation}
+\label{sec:setup-multi}
+
+\textbf{Data.} Six static recordings of the robot's Azure Kinect
+(\(1280{\times}720\), depth registered to colour) cover a laboratory with two
+wheelchair robots seen from afar, an office desk with a monitor and a window,
+a laboratory with a door and an open floor, a laboratory with two standing
+persons, a door with the robot arm in view, and the tuning recording.
+Between \(28\) and \(52\,\%\) of the pixels are holes (Table~\ref{tab:scenes}).
+The camera does not move, so ground truth inside real holes is unavailable but
+the completed depth should not change between frames. From each recording we
+use \(15\) frames (\(13\) for one short recording), \(0.07\) to \(0.6\,\)s
+apart. Every model is evaluated once per frame and cached, which makes the
+comparison deterministic.
+
+\textbf{Protocols.} Errors are computed on measured pixels below \(3\,\)m,
+where the arm operates, on the first two frames of each recording.
+(i)~\emph{Small holes}: square blocks of \(32\,\)px covering \(15\,\%\) of the
+image are hidden, as in the tuning study. (ii)~\emph{Large holes}: the same with
+\(128\,\)px blocks, whose interior is far from any measurement, as on black
+furniture or glass. (iii)~\emph{Edge band}: all measured pixels within \(6\,\)px
+of a measured depth edge (relative \(3{\times}3\) range \(>10\,\%\)) are
+hidden, which reproduces what the ToF camera loses at discontinuities. We
+report AbsRel and MAE of the filled pixels, the coverage (fraction of hidden
+pixels that receive a value), and the \emph{bleeding rate}: the fraction of
+hidden pixels filled with more than \(10\,\%\) error, i.e.\ points that would
+float in the map. Coverage must be read together with errors, because a filler
+that fills nothing has no error. (iv)~\emph{Flicker}: each recording is
+processed causally as in deployment, with the smoothed global scale and the
+warm-started fusion. We report the mean relative change of the completed
+depth between consecutive frames on pixels that are holes and filled in both,
+and the same quantity for the scaled prediction alone and for always-measured
+sensor pixels as references.
+
+\textbf{Hardware.} The multi-scene evaluation and its timings ran on an Apple
+M4 Pro with its integrated GPU (Metal backend, PyTorch). MoGe runs in single
+precision there, because its half-precision path requires CUDA; Depth Pro~2
+uses its default bfloat16 autocast.
 
 \begin{table}[t]
 \centering
-\caption{Tuned parameters; initial defaults in parentheses.}
-\label{tab:params}
+\caption{Recordings of the multi-scene evaluation (statistics over the
+evaluated frames).}
+\label{tab:scenes}
 \footnotesize
-\begin{tabular}{@{}lll@{}}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-& Parameter & Value \\
+Scene & Frames & Holes [\%] & Depth range [m] \\
 \midrule
-\multirow{5}{*}{\rotatebox{90}{Var.~A}}
-& window radius \(r\) & \(16\,\)px \hfill (32)\\
-& regulariser \(\varepsilon\) & \(10^{-3}\) \hfill (\(10^{-2}\))\\
-& downsampling \(d\) & \(2\) \hfill (4)\\
-& clip \([a_{\min},a_{\max}]\) & \([0.25,4]\) \hfill (\([0.5,2]\))\\
-& confidence \(\rho\), EMA \(\alpha\) & \(0.05\), \(0.3\) \hfill (unch.)\\
-\midrule
-\multirow{7}{*}{\rotatebox{90}{Var.~B}}
-& grid factor \(f\) & \(4\) \hfill (8)\\
-& smoothness \(\lambda\) & \(1.0\) \hfill (4.0)\\
-& edge scale \(\sigma_e\) & \(0.02\) \hfill (0.05)\\
-& decay \(\mu_{\mathrm{near}},\mu_{\mathrm{far}}\) & \(10^{-4}\), \(5\!\cdot\!10^{-3}\) \hfill (\(10^{-3}\), \(0.05\))\\
-& far band \(\beta\) & \(0.15\) \hfill (unch.)\\
-& noise ref.\ \(z_{\mathrm{ref}}\) & \(4\,\)m \hfill (2)\\
-& outlier scale \(\tau\) & \(1.0\) \hfill (0.1)\\
+Laboratory, far view          & 15 & 51.7 & 0.4--5.9 \\
+Office desk                   & 15 & 27.7 & 0.5--2.3 \\
+Laboratory, door and floor    & 15 & 37.3 & 1.4--4.8 \\
+Laboratory, two persons       & 13 & 44.9 & 0.5--4.9 \\
+Door, robot arm in view       & 15 & 39.3 & 0.6--3.9 \\
+Tuning recording              & 15 & 27.9 & 0.6--3.2 \\
 \bottomrule
 \end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Parameters. Initial: defaults before tuning. Tuned: grid search on the
+tuning recording (Sec.~\ref{sec:setup}). Final: deployed values after the
+multi-scene evaluation (Sec.~\ref{sec:res-multi}). Bold: changed.}
+\label{tab:params}
+\footnotesize
+\setlength{\tabcolsep}{2.6pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+& Parameter & Searched & Initial & Tuned & Final \\
+\midrule
+\multirow{6}{*}{\rotatebox{90}{Var.~A}}
+& radius \(r\) [px] & 8--96 & 32 & \textbf{16} & -- \\
+& regulariser \(\varepsilon\) & \(5\!\cdot\!10^{-4}\)--\(0.1\) & \(10^{-2}\) & \(\mathbf{10^{-3}}\) & -- \\
+& downsampling \(d\) & 2, 4 & 4 & \textbf{2} & -- \\
+& clip \([a_{\min},a_{\max}]\) & \([0.5,2]\), \([0.25,4]\) & \([0.5,2]\) & \(\mathbf{[0.25,4]}\) & -- \\
+& local stage only below [m] & off, 3, 4 & off & off & -- \\
+& EMA \(\alpha\) & 0, 0.1, 0.3 & 0.3 & 0.3 & -- \\
+\midrule
+\multirow{9}{*}{\rotatebox{90}{Var.~B}}
+& grid factor \(f\) & 2, 4, 8, 16 & 8 & \textbf{4} & \textbf{2} \\
+& smoothness \(\lambda\) & 0.3--16 & 4 & \textbf{1} & 1 \\
+& edge scale \(\sigma_e\) & 0.01--0.1 & 0.05 & \textbf{0.02} & \textbf{0.05} \\
+& noise ref.\ \(z_{\mathrm{ref}}\) [m] & 1, 2, 4 & 2 & \textbf{4} & 4 \\
+& outlier scale \(\tau\) & 0.05--1 & 0.1 & \textbf{1} & 1 \\
+& decay \(\mu_{\mathrm{near}}\) & \(10^{-4}\)--\(10^{-2}\) & \(10^{-3}\) & \(\mathbf{10^{-4}}\) & \(10^{-4}\) \\
+& decay \(\mu_{\mathrm{far}}\) & \(5\!\cdot\!10^{-3}\)--\(0.2\) & 0.05 & \(\mathbf{5\!\cdot\!10^{-3}}\) & \(5\!\cdot\!10^{-3}\) \\
+& far band \(\beta\) & 0.05, 0.15, 0.5 & 0.15 & 0.15 & 0.15 \\
+& CG iterations & 20, 40, 80 & 80 & 80 & \textbf{40} \\
+\midrule
+\multirow{2}{*}{\rotatebox{90}{\scriptsize Edge}}
+& jump \(\kappa\) [m\(^{-1}\)] & 0.01--0.02 & -- & -- & 0.015 \\
+& zone \(\gamma\) [px] & 4, 8 & -- & -- & 4 \\
+\bottomrule
+\end{tabular}}
 \end{table}
 
 % =========================================================================
 \section{Results}
 \label{sec:results}
+
+\subsection{Tuning Study}
 
 \textbf{Holdout accuracy.} Table~\ref{tab:main} shows that both local stages
 reduce the error of the global scale by a factor of about four, and that
@@ -1468,53 +1650,221 @@ Variant~B from \(2.80\) to \(3.75\,\%\), so the gap shrinks from \(0.9\) to
 which indicates fewer moderate errors and a few larger ones, likely in cells
 that straddle depth edges.
 
-\textbf{Large holes and temporal stability.} \todo{fill Table~\ref{tab:stability}
-and Figs.~\ref{fig:distance},~\ref{fig:temporal}; one paragraph on whether the
-ranking reverses for large and one-sided holes, and on flicker in permanent
-holes}
+\subsection{Multi-Scene Evaluation}
+\label{sec:res-multi}
+
+The following results use the protocols of Sec.~\ref{sec:setup-multi} on all
+six recordings. Unless stated otherwise, the prediction is MoGe-2 ViT-B with
+\(600\) tokens, the alignment is Variant~B and the edge filter is enabled.
+
+\textbf{Choice of the monocular model.}
+\label{sec:res-model}
+Table~\ref{tab:models} and Fig.~\ref{fig:acclat} compare the monocular models
+under the same completion. On small holes all models reach \(0.35\) to
+\(0.45\,\%\) AbsRel (\(0.5\)--\(0.7\,\)cm), because the alignment, not the model,
+determines the fill next to measurements. Large holes separate the models: the
+error ranges from \(1.97\,\%\) (MoGe-2 ViT-S, \(600\) tokens) to \(1.05\,\%\)
+(Depth Pro~2 L), and within each family it falls with model size. At equal
+latency, both families are about equally accurate: Depth Pro~2 S (\(151\,\)ms,
+\(1.61\,\%\)) against MoGe-2 ViT-S with \(1200\) tokens (\(129\,\)ms,
+\(1.59\,\%\)), and Depth Pro~2 B (\(345\,\)ms, \(1.32\,\%\)) against MoGe-2 ViT-L
+(\(308\,\)ms, \(1.34\,\%\)). Depth Pro~2, however, leaves far fewer gross errors
+inside large holes: \(0.6\)--\(0.9\,\%\) of the hidden pixels are filled with
+more than \(10\,\%\) error, against \(1.7\)--\(3.3\,\%\) for MoGe-2. Its completion
+changes more between frames of a static scene than that of the MoGe-2 model of
+similar size (\(1.55\)--\(1.93\) against \(1.19\)--\(1.52\,\%\)), because each
+frame is predicted independently; the streaming mode of Depth Pro~2 was not
+evaluated. Only MoGe-2 ViT-S and ViT-B with \(600\) tokens reach \(8\,\)Hz on
+the test hardware. We deploy MoGe-2 ViT-B with \(600\) tokens (\(9.3\,\)Hz).
+It reduces the large-hole error of the global scale alone from \(7.62\) to
+\(1.74\,\%\) (Table~\ref{tab:align}) and is \(0.69\) percentage points behind
+the most accurate model.
 
 \begin{table}[t]
 \centering
-\caption{Large and one-sided holes (AbsRel [\%]) and temporal stability in
-permanent sensor holes. \todo{fill from \texttt{moge\_eval\_stability.py}}}
-\label{tab:stability}
+\caption{Monocular models under the same completion (Variant~B, edge filter).
+Latency: model and completion per frame on an Apple M4 Pro GPU,
+\(1280{\times}720\). Errors below \(3\,\)m on held-out blocks of \(32\) and
+\(128\,\)px; gross: fraction of hidden pixels with more than \(10\,\%\) error.
+Flicker: mean relative frame-to-frame change of filled pixels in static scenes
+(prediction alone in parentheses). Deployed configuration in bold.}
+\label{tab:models}
+\footnotesize
+\setlength{\tabcolsep}{2.2pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llrrccccc@{}}
+\toprule
+& & & & 32\,px & \multicolumn{3}{c}{128\,px holes} & \\
+\cmidrule(lr){6-8}
+Model & Tok. & ms\,\(\downarrow\) & Hz\,\(\uparrow\) & [\%]\,\(\downarrow\) & [\%]\,\(\downarrow\) & [cm]\,\(\downarrow\) & gross [\%]\,\(\downarrow\) & Flicker [\%]\,\(\downarrow\) \\
+\midrule
+MoGe-2 ViT-S & 600  &   82 & 12.2 & 0.45 & 1.97 & 3.5 & 3.34 & 1.39 (1.60) \\
+MoGe-2 ViT-S & 1200 &  129 &  7.8 & 0.44 & 1.59 & 2.8 & 2.90 & 1.52 (1.78) \\
+\textbf{MoGe-2 ViT-B} & \textbf{600} & \textbf{107} & \textbf{9.3} & \textbf{0.44} & \textbf{1.74} & \textbf{3.0} & \textbf{3.08} & \textbf{1.36 (1.51)} \\
+MoGe-2 ViT-B & 1200 &  179 &  5.6 & 0.41 & 1.64 & 2.8 & 2.82 & 1.19 (1.35) \\
+MoGe-2 ViT-L & 1200 &  308 &  3.2 & 0.40 & 1.34 & 2.3 & 1.72 & 1.50 (2.33) \\
+\midrule
+Depth Pro 2 S & -- &  151 &  6.6 & 0.39 & 1.61 & 2.9 & 0.63 & 1.93 (2.39) \\
+Depth Pro 2 B & -- &  345 &  2.9 & 0.41 & 1.32 & 2.4 & 0.87 & 1.80 (2.15) \\
+Depth Pro 2 L & -- & 1009 &  1.0 & 0.35 & 1.05 & 1.9 & 0.63 & 1.55 (1.70) \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/accuracy_latency.pdf}
+\caption{Accuracy against latency of the monocular models under the same
+completion (AbsRel below \(3\,\)m on \(128\,\)px held-out blocks, Apple M4 Pro).
+Only configurations left of the dashed line reach \(8\,\)Hz. The deployed
+configuration (MoGe-2 ViT-B, \(600\) tokens) is outlined.}
+\label{fig:acclat}
+\end{figure}
+
+\textbf{Edge handling.}
+\label{sec:res-edges}
+Without edge handling, \(32\,\%\) of the hidden edge-band pixels are filled
+with more than \(10\,\%\) error (Table~\ref{tab:edges}). These are the ramp
+values between foreground and background of Sec.~\ref{sec:edgefilter}; they
+also raise the error on small holes from \(0.44\) to \(1.89\,\%\) and the
+flicker from \(1.36\) to \(2.03\,\%\). A threshold on the relative \(3{\times}3\)
+depth range on the completed image, as in common flying-pixel filters, leaves
+\(1.5\,\%\) bleeding, because a \(3{\times}3\) window sees only the steepest
+part of a ramp that is \(10\) to \(30\,\)px wide. The former combination of a
+plane-distance test and a support check removes all bleeding but fills only
+\(2\,\%\) of the edge band. The jump filter with \(\gamma=8\,\)px also removes
+all bleeding, fills \(19\,\%\) of the edge band and is the most accurate, but
+its wide zone leaves more of the real sensor holes empty (\(59\) against
+\(68\,\%\)). With the deployed \(\gamma=4\,\)px, \(0.04\,\%\) bleeding remains,
+\(21\,\%\) of the edge band and \(66\,\%\) of the real holes are filled, and the
+error on large holes and the flicker are still lower than with the former
+tests. We accept this residual for the larger filled area. Fig.~\ref{fig:clouds} shows the
+effect in 3-D: the completion without edge handling connects the wheelchairs
+with the wall by sheets of points, which the filter removes.
+
+\begin{table}[t]
+\centering
+\caption{Edge handling with Variant~B (MoGe-2 ViT-B, \(600\) tokens).
+Bleeding: fraction of hidden pixels filled with more than \(10\,\%\) error.
+Coverage: fraction of hidden pixels that receive a value. Real holes: fraction
+of real sensor holes that are filled. Errors below \(3\,\)m. Deployed in bold.}
+\label{tab:edges}
+\footnotesize
+\setlength{\tabcolsep}{2pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lcccccccr@{}}
+\toprule
+& \multicolumn{2}{c}{32\,px holes} & 128\,px & \multicolumn{2}{c}{Edge band} & Real & Flicker & ms \\
+\cmidrule(lr){2-3}\cmidrule(lr){5-6}
+Edge handling & AbsRel & Cov. & AbsRel & Bleed.\,\(\downarrow\) & Cov.\,\(\uparrow\) & holes & & \\
+ & [\%] & [\%] & [\%] & [\%] & [\%] & [\%] & [\%] & \\
+\midrule
+None                        & 1.89 & 100 & 2.86 & 32.1 & 100 & 100 & 2.03 & 21 \\
+Rel.\ \(3{\times}3\) range \(>4\,\%\) & 0.80 & 97 & 2.40 & 1.47 & 46 & 86 & 1.69 & 22 \\
+Plane dist.\ + support      & 0.47 & 87 & 1.92 & 0.00 & 2 & 68 & 1.49 & 23 \\
+Jump in \(1/z\), \(\gamma=8\,\)px & 0.33 & 81 & 1.64 & 0.00 & 19 & 59 & 1.29 & 23 \\
+\textbf{Jump in \(1/z\), \(\gamma=4\,\)px} & \textbf{0.44} & \textbf{86} & \textbf{1.74} & \textbf{0.04} & \textbf{21} & \textbf{66} & \textbf{1.36} & \textbf{22} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/clouds.png}
+\caption{Point clouds of one frame of the laboratory recording, rendered from a
+virtual viewpoint above and behind the camera. Left: sensor only. Middle:
+completed without edge handling; filled points (orange) form sheets between the
+wheelchairs and the wall along the smeared depth edges of the prediction.
+Right: completed with the edge filter; the sheets are removed and the filled
+surfaces of the background, beyond the sensor range, remain.}
+\label{fig:clouds}
+\end{figure*}
+
+\textbf{Alignment, large holes and stability.}
+\label{sec:res-align}
+Table~\ref{tab:align} compares the alignment stages with the same edge filter.
+The global scale alone leaves \(7\) to \(8\,\%\) error at every hole size. A
+local mean of the log residual within \(16\,\)px, a simplified form of
+Variant~A that is about \(7\) times faster, is close to Variant~B on small
+holes (\(0.58\) against \(0.44\,\%\)) but \(2.7\) times worse on large holes
+(\(4.64\) against \(1.74\,\%\)). Fig.~\ref{fig:distance} shows why: the local
+mean is the most accurate within \(16\,\)px of the nearest measurement and
+returns to the error of the global scale beyond \(32\,\)px, while the error of
+Variant~B grows gradually and stays below that of the local mean up to
+\(128\,\)px. This is the reversal anticipated in
+Sec.~\ref{sec:analysis}: the advantage of local alignment in the tuning study
+is a property of small held-out blocks. Over time, the completion changes by
+\(1.36\,\%\) between consecutive frames of a static scene, slightly less than
+the prediction itself (\(1.51\,\%\)) and six times the sensor noise
+(\(0.21\,\%\)). Fig.~\ref{fig:temporal} shows that this change is a
+frame-wise offset of whole surfaces, inherited from the per-frame prediction,
+that none of the alignments removes.
+
+\begin{table}[t]
+\centering
+\caption{Alignment stages with the same edge filter (MoGe-2 ViT-B, \(600\)
+tokens). Errors below \(3\,\)m; flicker on filled pixels of static scenes.}
+\label{tab:align}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}lccc@{}}
 \toprule
- & Global & Var.~A & Var.~B \\
+ & Stage~1 & Local mean & Var.~B (ours) \\
 \midrule
-Block holdout 128\,px\,\(\downarrow\)        & -- & -- & -- \\
-Block holdout 256\,px\,\(\downarrow\)        & -- & -- & -- \\
-One-sided, \(w=32\,\)px\,\(\downarrow\)      & -- & -- & -- \\
-One-sided, \(w=128\,\)px\,\(\downarrow\)     & -- & -- & -- \\
-\midrule
-Temporal CoV [\%]\,\(\downarrow\) (sensor: --) & -- & -- & -- \\
-Frame-to-frame change [\%]\,\(\downarrow\)    & -- & -- & -- \\
-Flicker \(>\!2\,\%\) [\%]\,\(\downarrow\)      & -- & -- & -- \\
+32\,px holes, AbsRel [\%]\,\(\downarrow\)  & 8.39 & 0.58 & \textbf{0.44} \\
+128\,px holes, AbsRel [\%]\,\(\downarrow\) & 7.62 & 4.64 & \textbf{1.74} \\
+128\,px holes, MAE [cm]\,\(\downarrow\)    & 11.1 & 7.1  & \textbf{3.0} \\
+128\,px holes, bleeding [\%]\,\(\downarrow\) & 16.6 & 8.0 & \textbf{3.1} \\
+128\,px holes, coverage [\%]\,\(\uparrow\) & \textbf{92} & 78 & 87 \\
+Edge band, bleeding [\%]\,\(\downarrow\)  & 25.6 & 1.07 & \textbf{0.04} \\
+Flicker [\%]\,\(\downarrow\) (sensor: 0.21) & 1.52 & 1.37 & \textbf{1.36} \\
+Time [ms]\,\(\downarrow\)                  & \textbf{3} & \textbf{3} & 22 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[t]
 \centering
-\figph{34mm}{\texttt{err\_vs\_distance.png}: AbsRel over distance to the
-nearest measurement (log x-axis), pooled over large and one-sided holes, for
-global, A and B, in the colours of Fig.~\ref{fig:concept}.}
-\caption{Completion error as a function of distance to the nearest sensor
-measurement. \todo{}}
+\includegraphics[width=\columnwidth]{figures/err_vs_distance.pdf}
+\caption{Completion error below \(3\,\)m as a function of the distance of a
+filled pixel to the nearest remaining measurement (\(128\,\)px held-out blocks,
+six recordings). The local mean is accurate only within about one window
+radius; the variational alignment carries the correction into the hole.}
 \label{fig:distance}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\figph{40mm}{\texttt{xt\_slice\_real.png}: completed depth of one image row
-through a permanent sensor hole over all frames (x: column, y: frame, colour:
-depth, white: hole border), for global, A and B.}
-\caption{Completed depth of one image row over time inside a permanent sensor
-hole. \todo{}}
+\includegraphics[width=\columnwidth]{figures/xt_slice.pdf}
+\caption{One image row of the laboratory recording over \(15\) frames (top to
+bottom) for the three alignment stages. Colour: deviation of the completed depth
+from its temporal median; grey: measured; white: not filled. The camera is
+static, so every colour is flicker. Rows of uniform colour show that whole
+surfaces shift together from frame to frame, as in the prediction.}
 \label{fig:temporal}
 \end{figure}
+
+\textbf{Qualitative results.} Fig.~\ref{fig:qualitative} shows the completion
+on three recordings. Holes on the dark wheelchairs, the monitor and beyond the
+sensor range are filled with the shape of the prediction at the scale of the
+measurements. The filter leaves a band of a few pixels around depth edges
+empty. It also discards large parts of the monitor in the desk scene and of
+the arm in the third scene. Both are close to the camera and partly seen at
+grazing angles, where the predicted depth changes as fast in \(1/z\) as at a
+smeared edge (Sec.~\ref{sec:edgefilter}); we have not verified this cause
+pixel by pixel.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/qualitative.png}
+\caption{Completion on three recordings with MoGe-2 ViT-B (\(600\) tokens),
+Variant~B and the edge filter. Columns: colour image, sensor depth (black:
+hole), prediction after the global scale, completed depth (magenta: discarded
+by the edge filter). Colour scale per row from near (blue) to far (red).}
+\label{fig:qualitative}
+\end{figure*}
+
+\subsection{Map Quality and Runtime}
 
 \textbf{Map quality.} \todo{fill Table~\ref{tab:maps} and
 Fig.~\ref{fig:mapdiff}; one paragraph on completeness, phantoms,
@@ -1558,7 +1908,10 @@ precision and \(1200\) tokens reduce MoGe-2 from \(93\)--\(101\) to
 \(40\,\)ms. On the CPU, which the robot's process manager restricts to one
 thread, Variant~B needs \(30\,\)ms with \(f=8\) and \(80\,\)ms with the tuned
 \(f=4\), for \(14.2\) and \(8.2\,\)Hz together with MoGe. The camera rate of
-\(15\,\)Hz is the upper bound. \todo{GPU fusion time}
+\(15\,\)Hz is the upper bound. On the Apple M4 Pro GPU of the multi-scene
+evaluation, Variant~B with \(f=2\) and the edge filter takes \(22\,\)ms per
+frame without warm start; Table~\ref{tab:models} lists the totals with each
+model. \todo{GPU timing on the robot}
 
 \begin{table}[t]
 \centering
@@ -1587,27 +1940,24 @@ MoGe + fusion, GPU, \(f=4\)         & \todo{} & \todo{} \\
 \section{Analysis}
 \label{sec:analysis}
 
-\textbf{What the sweeps show.} For Variant~A, smaller windows were better at
-every block size, and the optimal radius grew with the hole (\(r=8,12,16\) for
-\(16,32,64\,\)px). The regulariser had a flat optimum at
-\(\varepsilon\approx10^{-3}\), and a wider clip range helped on glass and fine
-structures; the data favour almost unregularised local scales. Range gating,
-the EMA factor and the structural alternatives changed AbsRel by at most
-\(0.02\) points. For Variant~B, the edge scale \(\sigma_e\) was the strongest
-parameter: the initial \(0.05\) suppressed corrections near edges. Weak
-smoothness (\(\lambda\in[0.3,2]\)) was preferred, so the prediction should
-determine the shape. Any outlier down-weighting (\(\tau<1\)) increased the
-error, which indicates that Kinect measurements are consistent enough that
-robust weighting removes more signal than noise. Smaller decay weights were
-better because larger ones confine the correction near the measurements.
+\textbf{What the tuning shows.} Variant~A prefers small windows and almost no
+regularisation (\(\varepsilon=10^{-3}\), wide clip range). For Variant~B, the
+edge scale \(\sigma_e\) had the largest effect, and outlier down-weighting
+(\(\tau<1\)) increased the error, so the Kinect measurements are consistent
+enough to be trusted as they are. Restricting Variant~A to near pixels
+increased the error, while the EMA factor, \(z_{\mathrm{ref}}\) and
+\(\beta\) had no measurable effect.
 
 \textbf{Why holdout accuracy favours Variant~A.} A held-out block is
 surrounded by measurements on all sides and is at most \(64\,\)px wide. A local
 fit then has dense support everywhere in the hole, its radius can be matched to
 the block size, and the most local estimator wins. Real holes on the robot are
 larger, often one-sided, and their surroundings change as the robot and the
-arm move. The shrinking gap in Table~\ref{tab:breakdown} is consistent with a
-reversal for larger holes. \todo{confirm or reject with Table~\ref{tab:stability}}
+arm move. The shrinking gap in Table~\ref{tab:breakdown} suggested a reversal
+for larger holes, and the multi-scene evaluation confirms it: on \(128\,\)px
+holes, a local alignment is \(2.7\) times less accurate than Variant~B
+(Table~\ref{tab:align}), and its error returns to that of the global scale
+beyond about two window radii (Fig.~\ref{fig:distance}).
 
 \textbf{Spatial seams.} The coefficients of Variant~A have support of radius
 \(r\). In a hole wider than about \(2r\) (\(\approx\!32\,\)px), the interior
@@ -1635,10 +1985,47 @@ become geometry, and corrections that switch between frames thicken surfaces.
 For this reason we deploy Variant~B. Variant~A remains useful where latency
 dominates and holes are small.
 
+\textbf{Edges dominate the error that matters.} Without edge handling, one in
+three fills next to a depth edge is wrong by more than \(10\,\%\)
+(Table~\ref{tab:edges}), while fills away from edges are accurate to a few
+millimetres. These errors repeat in every frame at the same place, so the TSDF
+turns them into the comet tails of Fig.~\ref{fig:clouds}. Edge handling is
+therefore a part of the completion, not an optional post-process. The jump
+filter is also the simplest of the tested filters: two parameters with a
+geometric meaning, no measurements and no intrinsics. Its cost is a band of a
+few pixels around every depth edge that stays empty and is observed only by the
+sensor. The zone width \(\gamma\) trades the residual bleeding against the filled
+area: \(8\,\)px removes all bleeding, \(4\,\)px fills \(7\) percentage points more
+of the real holes at \(0.04\,\%\) bleeding (Table~\ref{tab:edges}). Scaling the
+zone with the distance of the edge did not help in a preliminary test, because
+the ramps of the prediction have a similar width in pixels at all distances.
+
+\textbf{Model choice is a latency decision.} Next to measurements, all tested
+models are similarly accurate after alignment (\(0.35\)--\(0.45\,\%\)). They
+differ inside large holes, where the prediction is used without nearby
+measurements, and there the error falls with model size and latency
+(Fig.~\ref{fig:acclat}). At equal latency, Depth Pro~2 and MoGe-2 have a similar
+mean error, but Depth Pro~2 produces two to five times fewer gross errors
+inside large holes, which matters for the map because each gross error is a
+floating point. Its research-only licence and its higher flicker in per-frame
+mode speak against it for deployment. On a faster GPU, the same reasoning selects a
+larger model: the rate, not the accuracy next to measurements, decides.
+
+\textbf{Flicker comes from the prediction.} In static scenes the completion
+changes by \(1.2\)--\(1.9\,\%\) between frames, six to nine times the sensor
+noise, and the change follows the prediction (Fig.~\ref{fig:temporal}). The
+alignment reduces it only slightly, because the measurements constrain the
+correction near the hole border but not the frame-wise shape of the prediction
+inside the hole. At \(2\,\)m, \(1.4\,\%\) is \(2.7\,\)cm, slightly more than one
+\(2\,\)cm voxel; the TSDF averages such offsets over frames as long as they are
+independent. Temporally consistent
+predictions, such as the streaming mode of Depth Pro~2, are the natural next
+step.
+
 \textbf{Limitations.}
-(i)~Parameters were tuned on one short, largely static recording; the sweep
-plateaus are flat, and the map-level evaluation tests the parameters on
-further scenes.
+(i)~Parameters were tuned on one short, largely static recording and checked
+on six static recordings of the same building; moving cameras, other rooms
+and outdoor scenes are not covered, and the map-level evaluation is pending.
 (ii)~Held-out blocks only approximate real holes, and inside permanent holes
 only stability, not accuracy, can be measured.
 (iii)~Filled pixels enter the TSDF with the same weight as measurements;
@@ -1653,6 +2040,11 @@ which distorts the predicted shape near the image border.
 and probably cause part of the near-range error and the RMSE.
 (vii)~The human filter depends on a pose detector and misses heavily occluded
 people.
+(viii)~The edge filter cannot tell a smeared edge from a real surface that is
+seen at a grazing angle from less than about \(0.5\,\)m; such surfaces stay
+unfilled (Fig.~\ref{fig:qualitative}).
+(ix)~The multi-scene timings were measured on an Apple M4 Pro, not on the GPU
+of the robot.
 
 % =========================================================================
 \section{Conclusion}
@@ -1660,14 +2052,21 @@ people.
 We filled the holes of a ToF camera with an aligned metric monocular
 prediction before volumetric mapping on an assistive manipulator, and removed
 the arm and humans after completion using the capture time of each frame. Local
-affine alignment is the most accurate on small held-out blocks
-(\(2.75\,\%\) AbsRel), but it returns to the global scale beyond one window
-and is ill-conditioned where measurements are sparse. Variational log-depth
-alignment is slightly less accurate on that benchmark (\(3.27\,\%\)) and
-continuous in space and time by construction, which is the property a TSDF
-needs. \todo{one sentence with the stability and map-level result} Next steps
-are confidence-weighted integration of filled pixels and an evaluation of the
-effect on collision checking for the arm.
+affine alignment is the most accurate on small held-out blocks of the tuning
+recording (\(2.75\,\%\) AbsRel), but it returns to the global scale beyond one
+window. On six recordings, the variational alignment is \(2.7\) times more
+accurate on large holes (\(1.74\) against \(4.64\,\%\) below \(3\,\)m). Most of
+the remaining harmful error sits at depth edges, where the prediction draws a
+ramp: a filter that detects jumps in inverse depth and leaves a narrow zone
+around them unfilled reduces the fills with more than \(10\,\%\) error in the
+edge band from \(32\) to \(0.04\,\%\), at \(22\,\)ms for alignment and filter
+together. Among the monocular models,
+accuracy inside large holes is bought with latency; MoGe-2 ViT-B with \(600\)
+tokens is the most accurate configuration at \(8\,\)Hz on the test hardware.
+The completion inherits a frame-to-frame change of about \(1.4\,\%\) from the
+prediction. \todo{one sentence with the map-level result} Next steps are
+temporally consistent predictions, confidence-weighted integration of filled
+pixels, and an evaluation of the effect on collision checking for the arm.
 
 % =========================================================================
 \section*{Acknowledgment}
