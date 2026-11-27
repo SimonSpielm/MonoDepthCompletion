@@ -36,12 +36,12 @@ def default_device():
         "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def load_model(name, num_tokens=1200, device=None, stream=False):
-    """num_tokens applies to MoGe only, stream to Depth Pro 2 only."""
+def load_model(name, num_tokens=1200, device=None, stream=True, window=4):
+    """num_tokens applies to MoGe only, stream to Depth Pro 2 only (default: streaming mode)."""
     if name in MOGE:
         return MoGe(MOGE[name], num_tokens, device)
     if name in DEPTHPRO:
-        return DepthPro2(name, device, stream)
+        return DepthPro2(name, device, stream, window)
     raise ValueError(f"unknown model '{name}', available: {', '.join(MODELS)}")
 
 
@@ -96,17 +96,20 @@ def _stub_flex_gemm():
 
 
 class DepthPro2:
-    """Apple Depth Pro 2. stream=False: every image on its own (deterministic). stream=True: live
-    stream (unbuffered), attends to the 15 previous frames and is temporally more stable; the
-    focal length is fixed at the first frame. Only for one camera with a fixed image size."""
+    """Apple Depth Pro 2. stream=True (default): live stream (unbuffered), attends to the
+    previous window - 1 frames (default window 4) and is temporally more stable, at a higher cost
+    per frame that
+    grows with the window; the focal length is fixed at the first frame,
+    so one instance serves one camera with a fixed image size. stream=False: every image on its
+    own (deterministic, used by the offline benchmark)."""
 
-    def __init__(self, name="depthpro2-s", device=None, stream=False):
+    def __init__(self, name="depthpro2-s", device=None, stream=True, window=4):
         from depth_pro_2 import create_model_and_transforms
         self.model, self.transform = create_model_and_transforms(
             name, device=torch.device(device or default_device()))
         self.model.eval()
         self.dev = next(self.model.parameters()).device
-        self.use_stream, self.stream = stream, None
+        self.use_stream, self.window, self.stream = stream, window, None
 
     @torch.inference_mode()
     def __call__(self, rgb, fov_x):
@@ -114,7 +117,7 @@ class DepthPro2:
         x = self.transform(np.ascontiguousarray(rgb))
         if self.use_stream:
             if self.stream is None:
-                self.stream = self.model.stream(f_px=f_px, mode="unbuffered")
+                self.stream = self.model.stream(window=self.window, f_px=f_px, mode="unbuffered")
             d = self.stream.step(x)[-1]["depth"]
         else:
             d = self.model.infer(x, f_px=f_px)["depth"]

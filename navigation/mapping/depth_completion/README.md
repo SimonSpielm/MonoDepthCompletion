@@ -149,10 +149,18 @@ Einstellungen:
 
 - **MoGe**: `num_tokens` bestimmt die Auflösung, mit der das Netz rechnet. Mehr Tokens heißt
   genauer und langsamer; die Ausgabe hat immer die volle Bildgröße.
-- **Depth Pro 2**: rechnet immer in voller Auflösung. Mit `stream=True` (Viewer: `--stream`)
-  sieht das Modell zusätzlich die 15 Bilder davor und wird zeitlich ruhiger.
-- **Auswahl**: im ROS-Knoten oben `MODEL` und `NUM_TOKENS`, im Viewer `--model` und
-  `--num-tokens`.
+- **Depth Pro 2**: rechnet immer in voller Auflösung und läuft standardmäßig im
+  **Stream-Modus**: Das Modell sieht zusätzlich die Bilder davor (Fenster `STREAM_WINDOW`, Standard
+  4 inklusive des aktuellen) und wird dadurch zeitlich ruhiger. Das kostet Rechenzeit; auf dem
+  M4 Pro braucht Depth Pro 2 S 184 ms statt 134 ms pro Bild, mit Fenster 16 sind es 312 ms. Dafür
+  halbiert der Stream-Modus das Flackern der gefüllten Tiefe bei stillstehender Kamera: 1,91 %
+  (Einzelbild) → 0,89 % (Fenster 4) → 0,80 % (Fenster 16), weniger als bei MoGe-2
+  (1,2–1,5 %). Die Genauigkeit bleibt mit Fenster 4 gleich (große Löcher 1,67 % statt 1,64 %),
+  mit Fenster 16 sinkt sie leicht (1,79 %, mehr grobe Fehler). Einzelbilder: im Knoten
+  `STREAM = False`, im Viewer `--per-frame`. Der Offline-Benchmark rechnet für vergleichbare Zahlen
+  standardmäßig Einzelbilder (Stream mit `--stream`).
+- **Auswahl**: im ROS-Knoten oben `MODEL`, `NUM_TOKENS`, `STREAM`, `STREAM_WINDOW`, im Viewer
+  `--model`, `--num-tokens`, `--per-frame`, `--window`.
 
 Pixel, die das Modell selbst als ungültig markiert (z. B. Himmel) oder die weiter als 50 m
 entfernt sind, bekommen `inf` und werden nicht gefüllt.

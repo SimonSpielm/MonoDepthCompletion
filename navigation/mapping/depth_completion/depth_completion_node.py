@@ -63,6 +63,8 @@ from sensor_msgs.msg import CameraInfo, Image
 #   moge2-b 1200: 182 ms, 2.8 %  | moge    1200: 306 ms, 1.9 %  | depthpro2-l: 1029 ms, 1.6 %
 MODEL = "moge2-b"
 NUM_TOKENS = 600
+STREAM = True         # Depth Pro 2 only: streaming mode (attends to previous frames, steadier)
+STREAM_WINDOW = 4     # frames attended incl. the current one (M4 Pro, S: 4 -> 184 ms, 16 -> 312 ms; 16 adds gross errors)
 COLOR_TOPIC = "/camera/color/image_raw"
 DEPTH_TOPIC = "/camera/depth/image_raw"
 INFO_TOPIC = "/camera/color/camera_info"
@@ -180,7 +182,7 @@ class DepthCompletion(Node):
 
 def main():
     print(f"Lade {MODEL} ({NUM_TOKENS} Tokens) ...")
-    moge = load_model(MODEL, NUM_TOKENS)
+    moge = load_model(MODEL, NUM_TOKENS, stream=STREAM, window=STREAM_WINDOW)
     if moge.dev.type == "cpu":
         print("WARNUNG: keine GPU, Modell und Fusion laufen auf der CPU (sehr langsam).")
     rclpy.init()

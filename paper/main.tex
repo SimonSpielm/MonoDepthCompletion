@@ -106,7 +106,8 @@ falls from \(2.0\) to \(1.05\,\%\) with model size and latency, and Depth Pro~2
 leaves two to five times fewer gross errors there; MoGe-2 ViT-B is the most
 accurate model at \(8\,\)Hz on our test hardware. The completed depth changes by
 \(1.4\,\%\) between frames of a static scene, which it inherits from the
-per-frame prediction. \todo{map-level result, one sentence}
+per-frame prediction; the streaming mode of Depth Pro~2 halves this flicker at a
+higher latency. \todo{map-level result, one sentence}
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -1153,7 +1154,12 @@ predicted beyond \(50\,\)m are set to \(\Dp=\infty\).
 The deployed model is MoGe-2 ViT-B with \(600\) tokens. It is the most accurate
 configuration that reaches the target rate of \(8\,\)Hz together with the
 completion (Sec.~\ref{sec:res-model}). Depth Pro~2 is a drop-in alternative; its
-weights are licensed for research use only.
+weights are licensed for research use only. When it is selected, the node runs it in its
+streaming mode with a window of \(4\) frames, in which each frame also attends to the
+previous \(3\) frames. On the Apple M4 Pro this raises the network time of Depth Pro~2 S
+from \(134\) to \(184\,\)ms (\(312\,\)ms with the model's default window of \(16\)) and
+halves the flicker of the completion at unchanged accuracy (Sec.~\ref{sec:res-align}). All other results in Sec.~\ref{sec:results} use per-frame
+prediction.
 
 \subsection{Stage 1: Global Scale}
 \label{sec:global}
@@ -1673,8 +1679,8 @@ inside large holes: \(0.6\)--\(0.9\,\%\) of the hidden pixels are filled with
 more than \(10\,\%\) error, against \(1.7\)--\(3.3\,\%\) for MoGe-2. Its completion
 changes more between frames of a static scene than that of the MoGe-2 model of
 similar size (\(1.55\)--\(1.93\) against \(1.19\)--\(1.52\,\%\)), because each
-frame is predicted independently; the streaming mode of Depth Pro~2 was not
-evaluated. Only MoGe-2 ViT-S and ViT-B with \(600\) tokens reach \(8\,\)Hz on
+frame is predicted independently. Its streaming mode removes this disadvantage at
+a cost in latency (below). Only MoGe-2 ViT-S and ViT-B with \(600\) tokens reach \(8\,\)Hz on
 the test hardware. We deploy MoGe-2 ViT-B with \(600\) tokens (\(9.3\,\)Hz).
 It reduces the large-hole error of the global scale alone from \(7.62\) to
 \(1.74\,\%\) (Table~\ref{tab:align}) and is \(0.69\) percentage points behind
@@ -1798,7 +1804,17 @@ is a property of small held-out blocks. Over time, the completion changes by
 the prediction itself (\(1.51\,\%\)) and six times the sensor noise
 (\(0.21\,\%\)). Fig.~\ref{fig:temporal} shows that this change is a
 frame-wise offset of whole surfaces, inherited from the per-frame prediction,
-that none of the alignments removes.
+that none of the alignments removes. A prediction that attends to previous
+frames does: with the streaming mode of Depth Pro~2 S, evaluated on \(30\) frames
+per recording, the flicker of the completion falls from \(1.91\,\%\) (per frame) to
+\(0.89\,\%\) with a window of \(4\) frames and \(0.80\,\%\) with \(16\) frames, and that
+of the prediction alone from \(2.40\) to \(0.74\) and \(0.57\,\%\), at \(184\) and
+\(312\,\)ms instead of \(134\,\)ms network time and with an unchanged fraction of
+filled holes (\(63\,\%\)). On the last two frames of each recording, where the
+window is full, the error inside \(128\,\)px holes is \(1.64\,\%\) per frame,
+\(1.67\,\%\) with a window of \(4\) and \(1.79\,\%\) with \(16\) frames, and the
+fraction of gross errors there rises from \(1.2\) to \(1.3\) and \(2.2\,\%\). A short
+window thus keeps the accuracy and most of the gain in stability.
 
 \begin{table}[t]
 \centering
@@ -2018,9 +2034,9 @@ alignment reduces it only slightly, because the measurements constrain the
 correction near the hole border but not the frame-wise shape of the prediction
 inside the hole. At \(2\,\)m, \(1.4\,\%\) is \(2.7\,\)cm, slightly more than one
 \(2\,\)cm voxel; the TSDF averages such offsets over frames as long as they are
-independent. Temporally consistent
-predictions, such as the streaming mode of Depth Pro~2, are the natural next
-step.
+independent. A temporally consistent prediction removes most of it: the
+streaming mode of Depth Pro~2 halves the flicker of the completion, at a
+higher latency (Sec.~\ref{sec:res-align}).
 
 \textbf{Limitations.}
 (i)~Parameters were tuned on one short, largely static recording and checked
@@ -2064,8 +2080,8 @@ together. Among the monocular models,
 accuracy inside large holes is bought with latency; MoGe-2 ViT-B with \(600\)
 tokens is the most accurate configuration at \(8\,\)Hz on the test hardware.
 The completion inherits a frame-to-frame change of about \(1.4\,\%\) from the
-prediction. \todo{one sentence with the map-level result} Next steps are
-temporally consistent predictions, confidence-weighted integration of filled
+per-frame prediction, which a streaming prediction halves. \todo{one sentence with the map-level result} Next steps are
+a faster streaming prediction, confidence-weighted integration of filled
 pixels, and an evaluation of the effect on collision checking for the arm.
 
 % =========================================================================

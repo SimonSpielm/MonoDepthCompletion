@@ -70,7 +70,7 @@ def main():
              else "DepthPro2-" + m.split("-")[1].upper(), m, a.num_tokens) for m in a.models]
     results = []
     for name, kind, tok in runs:
-        model = load_model(kind, tok, a.device)
+        model = load_model(kind, tok, a.device, stream=False)    # single images
         model(rgb, fov)                                    # warm-up
         if model.dev.type == "mps":
             torch.mps.synchronize()

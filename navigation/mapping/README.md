@@ -111,7 +111,7 @@ python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-token
 ```
 
 ```bash
-python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --stream
+python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --window 4
 ```
 
 ```bash

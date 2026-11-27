@@ -9,7 +9,7 @@ All views are synchronised; the 3D views can be rotated and zoomed with the mous
 the code of the ROS node (depth_models.py + depth_fusion.fill), only with a display.
 
     python navigation/mapping/depth_completion/viewer.py                       # live, ROS 2
-    python navigation/mapping/depth_completion/viewer.py --model depthpro2-s --stream
+    python navigation/mapping/depth_completion/viewer.py --model depthpro2-s       # streaming mode
     python navigation/mapping/depth_completion/viewer.py --frames f.npz        # offline, no ROS
     python navigation/mapping/depth_completion/viewer.py --set edge_jump=0           # edge filter off
     python navigation/mapping/depth_completion/viewer.py --eval        # + error below 3 m over time
@@ -165,7 +165,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="moge2-b", choices=MODELS)
     ap.add_argument("--num-tokens", type=int, default=600, help="MoGe only")
-    ap.add_argument("--stream", action="store_true", help="Depth Pro 2 only: live stream mode")
+    ap.add_argument("--per-frame", action="store_true", help="Depth Pro 2 only: every image on its own instead of streaming")
+    ap.add_argument("--window", type=int, default=4, help="Depth Pro 2 streaming: frames attended (incl. current)")
     ap.add_argument("--set", nargs="*", default=[], help="parameters, e.g. edge_jump=0.02 edge_grow=4 down=4")
     ap.add_argument("--frames", help="offline: play a frames.npz instead of ROS")
     ap.add_argument("--save", help="write a .rrd recording instead of opening the viewer")
@@ -183,7 +184,7 @@ def main():
     fill_kw = {k: (int(v) if k == "edge_grow" else v) for k, v in params.items() if k not in FUSION_KEYS}
 
     print(f"Loading {a.model} ...")
-    model = load_model(a.model, a.num_tokens, stream=a.stream)
+    model = load_model(a.model, a.num_tokens, stream=not a.per_frame, window=a.window)
     rr.init("depth_completion_viewer", spawn=a.save is None)
     if a.save:
         rr.save(a.save)

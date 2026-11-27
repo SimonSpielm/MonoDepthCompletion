@@ -54,6 +54,8 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--set", nargs="*", help="fill/fusion parameters, override PROD")
     ap.add_argument("--fill-only", action="store_true", help="fill only, with a dummy prediction")
+    ap.add_argument("--per-frame", action="store_true", help="Depth Pro 2: every image on its own instead of streaming")
+    ap.add_argument("--window", type=int, default=4, help="Depth Pro 2 streaming: frames attended (incl. current)")
     a = ap.parse_args()
 
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else
@@ -79,7 +81,7 @@ def main():
     print(f"{'Modell':18s} {'Modell':>8s} {'fill':>6s} {'gesamt':>7s} {'Hz':>5s}")
     for spec in a.models:
         name, _, tok = spec.partition(":")
-        model = load_model(name, int(tok or 1200), str(dev))
+        model = load_model(name, int(tok or 1200), str(dev), stream=not a.per_frame, window=a.window)
         pred, t_model = timed(lambda: model(rgb, fov), dev, a.reps)
         pred = pred.float().to(dev)
         _, t_fill = timed(lambda: run_fill(pred), dev, a.reps)

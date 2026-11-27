@@ -170,7 +170,7 @@ def load_recorded(a, frames_path):
     depth = data["depth"].astype(np.float32)
     n = min(len(depth), a.limit) if a.limit else len(depth)
     fov = data["fov_x"].astype(np.float64) if "fov_x" in data else np.full(len(depth), np.nan)
-    tag = f"{a.predict}{a.num_tokens}" if a.predict in MOGE else a.predict
+    tag = f"{a.predict}{a.num_tokens}" if a.predict in MOGE else a.predict + (f"-stream{a.window}" if a.stream else "")
     preds_path = a.preds or (os.path.splitext(frames_path)[0] + f"_preds_{tag}.npz"
                              if a.predict else None)
     cached = np.load(preds_path)["pred"] if preds_path and os.path.exists(preds_path) else None
@@ -178,7 +178,7 @@ def load_recorded(a, frames_path):
         pred = cached[:n].astype(np.float32)
         n = len(pred)
     elif a.predict:
-        model = load_model(a.predict, a.num_tokens, a.model_device)
+        model = load_model(a.predict, a.num_tokens, a.model_device, stream=a.stream, window=a.window)
         print(f"{a.predict} auf {model.dev} ...")
         preds = []
         for i in range(n):
@@ -293,6 +293,9 @@ def main():
     ap.add_argument("--predict", choices=MODELS,
                     help="run the model locally (and cache)")
     ap.add_argument("--num-tokens", type=int, default=1200, help="MoGe only")
+    ap.add_argument("--stream", action="store_true",
+                    help="Depth Pro 2 only: streaming mode over the frames of each file (default here: per frame)")
+    ap.add_argument("--window", type=int, default=4, help="Depth Pro 2 streaming: frames attended (incl. current)")
     ap.add_argument("--model-device", default=None, help="cuda / mps / cpu (default: automatic)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--device", default=None,

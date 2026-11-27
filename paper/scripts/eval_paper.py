@@ -137,8 +137,8 @@ def sync():
 
 # ---------------------------------------------------------------- data
 
-def load_scenes(model, tokens, n):
-    tag = f"{model}{tokens}" if model in B.MOGE else model
+def load_scenes(model, tokens, n, tag=None):
+    tag = tag or (f"{model}{tokens}" if model in B.MOGE else model)
     scenes = []
     for s in SCENES:
         data = np.load(os.path.join(FRAMES, s + ".npz"))
@@ -154,12 +154,16 @@ def load_scenes(model, tokens, n):
 
 # ---------------------------------------------------------------- protocols
 
-def holdout(scenes, align, edges, hold_px, frames=2, seed=0, dist_bins=None):
+def holdout(scenes, align, edges, hold_px, frames=2, seed=0, dist_bins=None, last=False):
+    """last=True evaluates the last `frames` frames of each sequence (e.g. streaming predictions
+    with a full window) with the same hidden blocks as the first ones."""
     rows, ms, dist_err = [], [], []
     for sc in scenes:
-        for i in range(min(frames, len(sc.depth))):
+        n = min(frames, len(sc.depth))
+        for k in range(n):
+            i = len(sc.depth) - n + k if last else k
             depth, pred = sc.depth[i], sc.pred[i]
-            rng = np.random.default_rng(seed + i)
+            rng = np.random.default_rng(seed + k)
             valid = depth > 0
             H, W = depth.shape
             pick = rng.random((-(-H // hold_px), -(-W // hold_px))) < 0.15
@@ -233,10 +237,13 @@ def main():
     ap.add_argument("--only", choices=("all", "main"), default="all",
                     help="main = deployed variant only (fusion + jump)")
     ap.add_argument("--xt", default="azure_kinect:300", help="scene:row for the x-t slice")
+    ap.add_argument("--tag", help="prediction cache tag, e.g. depthpro2-s-stream16 (default from model)")
+    ap.add_argument("--n", type=int, default=15, help="frames per recording")
+    ap.add_argument("--last", action="store_true", help="hold-out on the last 2 frames instead of the first")
     a = ap.parse_args()
     torch.set_num_threads(4)
 
-    scenes = load_scenes(a.model, a.tokens, 15)
+    scenes = load_scenes(a.model, a.tokens, a.n, a.tag)
     variants = [("fusion", "jump")] if a.only == "main" else [
         ("fusion", "none"), ("fusion", "rel3x3"), ("fusion", "plane"), ("fusion", "jump"),
         ("global", "jump"), ("local", "jump")]
@@ -246,8 +253,8 @@ def main():
     for align, edges in variants:
         key = f"{align}+{edges}"
         print(f"{key} ...", flush=True)
-        r = {"hold32": holdout(scenes, align, edges, 32),
-             "hold128": holdout(scenes, align, edges, 128, dist_bins=[0, 8, 16, 32, 64, 128]),
+        r = {"hold32": holdout(scenes, align, edges, 32, last=a.last),
+             "hold128": holdout(scenes, align, edges, 128, dist_bins=[0, 8, 16, 32, 64, 128], last=a.last),
              "temporal": temporal(scenes, align, edges, keep_row=(xt_scene, int(xt_row)))}
         out["variants"][key] = r
         h, g, t = r["hold32"], r["hold128"], r["temporal"]
@@ -256,7 +263,9 @@ def main():
               f"edge bleed {100 * h['edge_bleed']:.2f}% cov {100 * h['edge_cov']:.0f}% | "
               f"flicker {100 * t['filled']:.2f}% | {h['ms']:.0f} ms", flush=True)
     os.makedirs(os.path.join(ROOT, "paper", "results"), exist_ok=True)
-    path = os.path.join(ROOT, "paper", "results", f"eval_{a.model}{a.tokens if a.model in B.MOGE else ''}.json")
+    name = a.tag or f"{a.model}{a.tokens if a.model in B.MOGE else ''}"
+    suffix = (f"_n{a.n}" if a.n != 15 else "") + ("_last" if a.last else "")
+    path = os.path.join(ROOT, "paper", "results", f"eval_{name}{suffix}.json")
     with open(path, "w") as f:
         json.dump(out, f)
     print("->", path)

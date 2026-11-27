@@ -117,7 +117,10 @@ bei `rosbag`). Fehler unter 3 m.
 - Der Kantentest misst den Sprung in 1/Tiefe statt in der Tiefe: Im relativen Tiefensprung galt
   der flach gesehene Boden ab etwa 2 m als Kante, die Abdeckung sank auf 24–73 %.
 - Flackern: Das Modell allein ändert sich von Frame zu Frame um 1,4–1,6 %, der Sensor um 0,2 %.
-  Keine Variante beruhigt das Modell nennenswert; das Flackern kommt vom Modell.
+  Keine Variante der Füllung beruhigt das Modell nennenswert; das Flackern kommt vom Modell.
+- Stream-Modus von Depth Pro 2 S (`--stream --window W`, 30 Frames pro Aufnahme): Flackern der
+  gefüllten Tiefe 1,91 % (Einzelbild) → 0,89 % (Fenster 4) → 0,80 % (Fenster 16), Modell allein
+  2,40 → 0,74 → 0,57 %. Laufzeit des Modells auf dem M4 Pro 134 → 184 → 312 ms.
 - Einrasten von Zwischenwerten auf die nähere Seite statt Verwerfen wurde getestet und verworfen
   (21 % Bleeding, landet oft auf der falschen Seite).
 - Die Fusionsparameter (`down`, `lam`, `sigma_edge`) ändern den Fehler in großen Löchern kaum;
