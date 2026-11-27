@@ -57,11 +57,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
-# Model (depth_models.MODELS) / resolution. Measured on M4 Pro (MPS), 1280x720, incl. fusion
-# (bench/speed.py), error < 3 m in large holes (bench/depth_bench.py --hold-px 128):
-#   moge2-s  600:  85 ms, 3.8 %  | moge2-b  600: 107 ms, 3.1 %  <- 8 Hz target
-#   moge2-b 1200: 182 ms, 2.8 %  | moge    1200: 306 ms, 1.9 %  | depthpro2-l: 1029 ms, 1.6 %
-MODEL = "moge2-b"
+# Model (depth_models.MODELS) / resolution. Measured on the robot's RTX A6000, 1280x720, incl.
+# completion (bench/run_suite.py, report rmc-lx0481_20261127_1009), error < 3 m in large holes:
+#   moge     600:  34 ms, 1.39 %, gross 1.1 %  <- default
+#   moge2-b  600:  28 ms, 1.98 %, gross 3.7 %  | moge2-s 600: 24 ms, 2.55 %, gross 5.1 %
+#   depthpro2-b stream 4: 52 ms, 1.56 %, steadier (flicker 0.9 vs 1.2 %), research licence
+MODEL = "moge"
 NUM_TOKENS = 600
 STREAM = True         # Depth Pro 2 only: streaming mode (attends to previous frames, steadier)
 STREAM_WINDOW = 4     # frames attended incl. the current one (M4 Pro, S: 4 -> 184 ms, 16 -> 312 ms; 16 adds gross errors)

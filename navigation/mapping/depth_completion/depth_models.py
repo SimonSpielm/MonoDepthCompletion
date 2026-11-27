@@ -1,7 +1,7 @@
 """
 Monocular depth models behind one common interface, without ROS.
 
-    model = load_model("moge2-b", num_tokens=600)
+    model = load_model("moge", num_tokens=600)
     depth = model(rgb, fov_x)     # rgb (H, W, 3) uint8, fov_x [deg] or None
                                   # -> torch tensor (H, W) [m] on model.dev, invalid = inf
 
@@ -9,9 +9,10 @@ Used by the ROS node (depth_completion_node.py), the viewer (viewer.py) and the
 offline benchmark (bench/), so all of them call a model the same way.
 
 Models (runtime and accuracy: bench/README.md):
-  moge        MoGe-2 vitl            package moge
+  moge        MoGe-2 vitl            package moge (default of the ROS node, 600 tokens, 29 Hz on an A6000)
   moge2-s     MoGe-2 vits-normal     package moge
-  moge2-b     MoGe-2 vitb-normal     package moge (default of the ROS node, 600 tokens ~9 Hz)
+  moge2-b     MoGe-2 vitb-normal     package moge
+  moge2-l-normal  MoGe-2 vitl-normal package moge
   moge3-l     MoGe-3 vitl            package moge; refinement only with CUDA (flex_gemm/Triton)
   depthpro2-s|b|l|h  Apple Depth Pro 2   package depth_pro_2, weights for research use only
 """

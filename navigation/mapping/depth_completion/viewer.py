@@ -163,7 +163,7 @@ def backproject(depth, rgb, fx, fy, cx, cy, stride, max_depth):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="moge2-b", choices=MODELS)
+    ap.add_argument("--model", default="moge", choices=MODELS)
     ap.add_argument("--num-tokens", type=int, default=600, help="MoGe only")
     ap.add_argument("--per-frame", action="store_true", help="Depth Pro 2 only: every image on its own instead of streaming")
     ap.add_argument("--window", type=int, default=4, help="Depth Pro 2 streaming: frames attended (incl. current)")

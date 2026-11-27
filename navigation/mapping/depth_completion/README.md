@@ -88,7 +88,7 @@ python -c "import torch, numpy, rclpy, sensor_msgs.msg; print(torch.cuda.is_avai
 ```
 
 ```bash
-python -c "import sys; sys.path.insert(0, 'navigation/mapping/depth_completion'); from depth_models import load_model; print(load_model('moge2-b', 600).dev)"
+python -c "import sys; sys.path.insert(0, 'navigation/mapping/depth_completion'); from depth_models import load_model; print(load_model('moge', 600).dev)"
 ```
 
 In einem bereits bestehenden Env fehlt für den neuen Viewer nur Rerun:
@@ -122,7 +122,7 @@ Eine Aufnahme aus dem Labor (MoGe-2 B, 600 Tokens):
 Alle Modelle stecken hinter einer gemeinsamen Schnittstelle in `depth_models.py`:
 
 ```python
-model = load_model("moge2-b", num_tokens=600)
+model = load_model("moge", num_tokens=600)
 depth = model(rgb, fov_x)   # RGB (H, W, 3) und Sichtfeld -> Tiefe [m] je Pixel, ungültig = inf
 ```
 
@@ -135,8 +135,9 @@ Maßstab und Kanten aber nicht perfekt.
 | Name | Modell | Paket | Hinweis |
 |---|---|---|---|
 | `moge2-s` | MoGe-2 vits-normal | `moge` | am schnellsten |
-| **`moge2-b`** | **MoGe-2 vitb-normal** | `moge` | **Standard im ROS-Knoten** |
-| `moge` | MoGe-2 vitl | `moge` | genauer, langsamer |
+| `moge2-b` | MoGe-2 vitb-normal | `moge` | schnell, aber deutlich mehr grobe Fehler in großen Löchern |
+| **`moge`** | **MoGe-2 vitl** | `moge` | **Standard im ROS-Knoten** (600 Tokens, 29 Hz auf der A6000) |
+| `moge2-l-normal` | MoGe-2 vitl-normal | `moge` | wie `moge`, zusätzlich Normalen-Kopf |
 | `moge3-l` | MoGe-3 vitl | `moge` | Verfeinerung nur mit CUDA, sonst nur Basisnetz |
 | `depthpro2-s` | Apple Depth Pro 2 S | `depth_pro_2` | Gewichte nur für Forschung |
 | `depthpro2-b` | Apple Depth Pro 2 B | `depth_pro_2` | Gewichte nur für Forschung |
@@ -148,7 +149,8 @@ Laufzeit und Genauigkeit der Modelle: [bench/README.md](bench/README.md).
 Einstellungen:
 
 - **MoGe**: `num_tokens` bestimmt die Auflösung, mit der das Netz rechnet. Mehr Tokens heißt
-  genauer und langsamer; die Ausgabe hat immer die volle Bildgröße.
+  langsamer, aber nicht zuverlässig genauer: Auf der A6000 des Roboters war MoGe-2 L mit 600
+  Tokens genauer als mit 1200 oder 2400. Die Ausgabe hat immer die volle Bildgröße.
 - **Depth Pro 2**: rechnet immer in voller Auflösung und läuft standardmäßig im
   **Stream-Modus**: Das Modell sieht zusätzlich die Bilder davor (Fenster `STREAM_WINDOW`, Standard
   4 inklusive des aktuellen) und wird dadurch zeitlich ruhiger. Das kostet Rechenzeit; auf dem
@@ -290,5 +292,5 @@ Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleibe
 | `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
 
 ```bash
-python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-tokens 600
+python navigation/mapping/depth_completion/viewer.py --model moge --num-tokens 600
 ```

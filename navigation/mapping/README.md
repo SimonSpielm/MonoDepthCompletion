@@ -36,7 +36,7 @@ Jeder Schritt ist ein eigener Prozess mit genau einer Aufgabe. Die Schritte komm
 |---|---|---|---|---|
 | 1 | `ln_camera_publisher.py` | Azure Kinect per k4a auslesen, RGB, registrierte Tiefe und K mit Zeitstempel auf LN publishen. **Nur mit lokal angeschlossener Kamera**, auf dem echten System gibt es den Treiber schon. | k4a | LN `camera.perception/*` |
 | 2 | `ln_ros_camera_bridge.py` | LN-Kameradaten 1:1 nach ROS. `read()` blockiert, also kein Timer: jeder Frame wird sofort weitergereicht. | LN | `/camera/*` (roh) |
-| 3 | `depth_completion/depth_completion_node.py` | Monokulares Tiefenmodell (wählbar: MoGe-2/3 oder Depth Pro 2, Standard MoGe-2 B mit 600 Tokens, ~9 Hz auf M4 Pro) + Gradienten-Fusion (CG auf der GPU) + Kantenfilter füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/*` |
+| 3 | `depth_completion/depth_completion_node.py` | Monokulares Tiefenmodell (wählbar: MoGe-2/3 oder Depth Pro 2, Standard MoGe-2 L mit 600 Tokens, 29 Hz auf der RTX A6000 des Roboters) + Gradienten-Fusion (CG auf der GPU) + Kantenfilter füllt die Löcher der Sensortiefe. Gemessene Pixel bleiben unverändert. Keine Anzeige. | `/camera/depth/image_raw` (Trigger), `/camera/color/*` | `/camera/completed/*` |
 | 4 | `camera_frame_filter.py` | TF zum Frame-Zeitstempel, Min/Max-Distanz, fliegende Pixel an Tiefenkanten, Menschen (`--mask_humans`) und Roboterarm (`--filter_robot`) maskieren, gefilterte Tiefe + Punktwolke publishen. `--depth_source raw` nimmt die rohe Tiefe (ohne Schritt 3), `--no-publish_pointcloud` schaltet die Punktwolke ab. | `/camera/completed/*` | `/tf`, `/camera/filtered/*` |
 | 5 | `start_nvblox.py` | TSDF-Karte aus der gefilterten Tiefe, belegte Voxel um die Kamera als Punktwolke, isolierte Voxel (Speckles) entfernt. LN-Service `nvblox.reset_map`. | `/camera/filtered/depth/image_raw` | `/nvblox/occupied_points_rgb` |
 | 5' | `start_octomap_mapping.py` | Alternative: ROS `octomap_server` auf der gefilterten Punktwolke. | `/camera/filtered/points` | `/octomap_point_cloud_centers` |
@@ -107,7 +107,7 @@ Pipeline laufen (eigenes Modell im GPU-Speicher). Mit `--frames f.npz` spielt er
 Aufnahme ohne ROS ab, mit `--eval` zeigt er zusätzlich den Fehler unter 3 m als Kurve über die Zeit.
 
 ```bash
-python navigation/mapping/depth_completion/viewer.py --model moge2-b --num-tokens 600
+python navigation/mapping/depth_completion/viewer.py --model moge --num-tokens 600
 ```
 
 ```bash

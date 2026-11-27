@@ -181,6 +181,35 @@ Bleeding unter 3 m:
 | Depth Pro 2 B | – | 348 | 2,9 | 0,41 % / 0,6 cm | 2,24 % / 3,3 cm | 0,00 % |
 | Depth Pro 2 L | – | 1029 | 1,0 | 0,38 % / 0,6 cm | 1,59 % / 2,4 cm | 0,00 % |
 
-Für 8 Hz ist MoGe-2 B mit 600 Tokens die Wahl (Standard im ROS-Knoten); im Knoten kommen noch
-Konvertierung und Publish hinzu. MoGe-3 braucht für seine Verfeinerung CUDA und wurde hier nicht
-verglichen.
+Auf dem M4 Pro ist für 8 Hz MoGe-2 B mit 600 Tokens die Wahl; im Knoten kommen noch Konvertierung
+und Publish hinzu. MoGe-3 braucht für seine Verfeinerung CUDA und wurde hier nicht verglichen. Auf
+dem Roboter gilt die Auswahl unten.
+
+## Ergebnisse auf dem Roboter (RTX A6000, `run_suite.py`)
+
+Bericht: [reports/rmc-lx0481_20261127_1009](reports/rmc-lx0481_20261127_1009/) mit allen 30
+Konfigurationen, 4 Aufnahmen mit je 30 Bildern (drei Bags vom Roboter und die Tuning-Aufnahme),
+Fehler unter 3 m. Plots: `plot_tradeoff.png` (Fehler, grobe Fehler und Flackern über der Rechenzeit)
+und `plot_szenen.png` (pro Aufnahme), RGB der Szenen in `szenen_rgb/`.
+
+| Modell | Variante | ms | Hz | 128 px AbsRel | grob | Flackern |
+|---|---|---|---|---|---|---|
+| MoGe-2 S | 600 | 24 | 42,6 | 2,55 % | 5,14 % | 1,66 % |
+| MoGe-2 B | 600 | 28 | 36,3 | 1,98 % | 3,70 % | 1,54 % |
+| **MoGe-2 L** | **600** | **34** | **29,2** | **1,39 %** | **1,11 %** | **1,24 %** |
+| MoGe-2 L | 1200 | 48 | 20,7 | 1,77 % | 2,35 % | 1,17 % |
+| MoGe-3 L | 1200, Verfeinerung | 102 | 9,8 | 1,43 % | 1,03 % | 1,21 % |
+| MoGe-3 G | 600, Verfeinerung | 104 | 9,6 | 1,25 % | 1,20 % | 1,13 % |
+| Depth Pro 2 B | Stream 4 | 52 | 19,2 | 1,56 % | 1,03 % | 0,94 % |
+| Depth Pro 2 L | Einzelbild | 98 | 10,2 | 1,24 % | 0,90 % | 1,83 % |
+| Depth Pro 2 H | Stream 4 | 195 | 5,1 | 1,16 % | 1,05 % | 0,78 % |
+
+- Die Fusion braucht auf der A6000 9 ms; 24 der 30 Konfigurationen schaffen 8 Hz.
+- Kleine Löcher (32 px) füllen alle Modelle mit 0,40–0,49 %.
+- MoGe-2 S und B machen vor allem auf der Tuning-Aufnahme viele grobe Fehler (bis 17 %).
+- Mehr Tokens bringen keinen einheitlichen Gewinn, die MoGe-3-Verfeinerung wenig bei doppelter Zeit.
+- Der Stream-Modus von Depth Pro 2 halbiert das Flackern; bei S kostet er Genauigkeit.
+- **Standard im ROS-Knoten ist deshalb MoGe-2 L mit 600 Tokens.** Wenn das Flackern wichtiger ist
+  als die Lizenz: Depth Pro 2 B im Stream-Modus.
+- Unterschiede unter etwa 0,3 Prozentpunkten zwischen den großen Modellen sind mit 2 Hold-out-Bildern
+  pro Aufnahme nicht belastbar.
