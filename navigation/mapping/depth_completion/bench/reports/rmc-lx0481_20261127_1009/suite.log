@@ -1,0 +1,186 @@
+10:09:38 device cuda NVIDIA RTX A6000, 30 configurations -> /home/spie_si/Documents/main/navigation/mapping/depth_completion/bench/reports/rmc-lx0481_20261127_1009
+10:09:38 recording depth_estimation: 30 frames, 1280x720, holes 51.8 %, FoV 93.0
+10:09:38 recording octomap: 30 frames, 1280x720, holes 27.7 %, FoV 93.0
+10:09:39 recording azure_kinect: 30 frames, 1280x720, holes 37.3 %, FoV 93.0
+10:09:39 recording frames: 30 frames, 1280x720, holes 27.9 %, FoV 93.0
+10:09:39 [1/30] moge2-s:600
+10:09:51   depth_estimation: model 15 ms, 128px <3m 0.71 %, flicker 2.03 %
+10:09:52   octomap: model 14 ms, 128px <3m 2.79 %, flicker 0.87 %
+10:09:53   azure_kinect: model 14 ms, 128px <3m 1.55 %, flicker 1.13 %
+10:09:54   frames: model 14 ms, 128px <3m 5.14 %, flicker 2.62 %
+10:09:54   -> 23 ms (42.6 Hz), 128px <3m 2.55 %, gross 5.14 %, flicker 1.66 %
+10:09:54 [2/30] moge2-s:1200
+10:09:55   depth_estimation: model 22 ms, 128px <3m 0.67 %, flicker 1.88 %
+10:09:56   octomap: model 22 ms, 128px <3m 2.05 %, flicker 0.73 %
+10:09:58   azure_kinect: model 22 ms, 128px <3m 1.57 %, flicker 1.09 %
+10:09:59   frames: model 22 ms, 128px <3m 3.91 %, flicker 2.57 %
+10:09:59   -> 31 ms (31.7 Hz), 128px <3m 2.05 %, gross 3.61 %, flicker 1.57 %
+10:09:59 [3/30] moge2-s:2400
+10:10:01   depth_estimation: model 36 ms, 128px <3m 0.60 %, flicker 2.06 %
+10:10:03   octomap: model 36 ms, 128px <3m 2.05 %, flicker 0.67 %
+10:10:04   azure_kinect: model 36 ms, 128px <3m 1.53 %, flicker 1.27 %
+10:10:06   frames: model 36 ms, 128px <3m 5.18 %, flicker 2.08 %
+10:10:06   -> 45 ms (22.0 Hz), 128px <3m 2.34 %, gross 5.19 %, flicker 1.52 %
+10:10:06 [4/30] moge2-b:600
+10:10:08   depth_estimation: model 19 ms, 128px <3m 1.03 %, flicker 2.08 %
+10:10:09   octomap: model 18 ms, 128px <3m 1.60 %, flicker 0.57 %
+10:10:10   azure_kinect: model 18 ms, 128px <3m 1.77 %, flicker 1.32 %
+10:10:11   frames: model 18 ms, 128px <3m 3.53 %, flicker 2.20 %
+10:10:11   -> 28 ms (36.3 Hz), 128px <3m 1.98 %, gross 3.70 %, flicker 1.54 %
+10:10:11 [5/30] moge2-b:1200
+10:10:14   depth_estimation: model 29 ms, 128px <3m 0.78 %, flicker 1.74 %
+10:10:16   octomap: model 29 ms, 128px <3m 1.65 %, flicker 0.62 %
+10:10:17   azure_kinect: model 29 ms, 128px <3m 1.79 %, flicker 1.16 %
+10:10:19   frames: model 29 ms, 128px <3m 3.80 %, flicker 1.85 %
+10:10:19   -> 38 ms (26.4 Hz), 128px <3m 2.01 %, gross 3.56 %, flicker 1.34 %
+10:10:19 [6/30] moge2-b:2400
+10:10:22   depth_estimation: model 46 ms, 128px <3m 0.55 %, flicker 1.69 %
+10:10:23   octomap: model 46 ms, 128px <3m 1.58 %, flicker 0.59 %
+10:10:25   azure_kinect: model 46 ms, 128px <3m 1.82 %, flicker 1.22 %
+10:10:27   frames: model 46 ms, 128px <3m 4.11 %, flicker 1.62 %
+10:10:27   -> 55 ms (18.3 Hz), 128px <3m 2.01 %, gross 3.99 %, flicker 1.28 %
+10:10:27 [7/30] moge:600
+10:10:31   depth_estimation: model 25 ms, 128px <3m 0.47 %, flicker 1.65 %
+10:10:32   octomap: model 25 ms, 128px <3m 0.82 %, flicker 0.61 %
+10:10:33   azure_kinect: model 25 ms, 128px <3m 1.69 %, flicker 0.83 %
+10:10:35   frames: model 25 ms, 128px <3m 2.60 %, flicker 1.87 %
+10:10:35   -> 34 ms (29.2 Hz), 128px <3m 1.39 %, gross 1.11 %, flicker 1.24 %
+10:10:35 [8/30] moge:1200
+10:10:39   depth_estimation: model 39 ms, 128px <3m 0.75 %, flicker 1.90 %
+10:10:40   octomap: model 39 ms, 128px <3m 1.01 %, flicker 0.54 %
+10:10:42   azure_kinect: model 39 ms, 128px <3m 1.90 %, flicker 0.95 %
+10:10:44   frames: model 39 ms, 128px <3m 3.42 %, flicker 1.29 %
+10:10:44   -> 48 ms (20.7 Hz), 128px <3m 1.77 %, gross 2.35 %, flicker 1.17 %
+10:10:44 [9/30] moge:2400
+10:10:48   depth_estimation: model 65 ms, 128px <3m 0.66 %, flicker 1.67 %
+10:10:51   octomap: model 65 ms, 128px <3m 0.96 %, flicker 0.54 %
+10:10:53   azure_kinect: model 65 ms, 128px <3m 1.91 %, flicker 1.07 %
+10:10:56   frames: model 65 ms, 128px <3m 2.97 %, flicker 1.34 %
+10:10:56   -> 74 ms (13.5 Hz), 128px <3m 1.62 %, gross 1.19 %, flicker 1.15 %
+10:10:56 [10/30] moge2-l-normal:600
+10:11:55   depth_estimation: model 27 ms, 128px <3m 0.91 %, flicker 1.84 %
+10:11:56   octomap: model 27 ms, 128px <3m 0.86 %, flicker 0.54 %
+10:11:58   azure_kinect: model 27 ms, 128px <3m 1.83 %, flicker 0.93 %
+10:11:59   frames: model 27 ms, 128px <3m 2.38 %, flicker 1.60 %
+10:11:59   -> 36 ms (27.5 Hz), 128px <3m 1.50 %, gross 1.22 %, flicker 1.23 %
+10:11:59 [11/30] moge2-l-normal:1200
+10:12:03   depth_estimation: model 42 ms, 128px <3m 0.59 %, flicker 2.08 %
+10:12:05   octomap: model 42 ms, 128px <3m 0.98 %, flicker 0.53 %
+10:12:07   azure_kinect: model 42 ms, 128px <3m 1.91 %, flicker 1.01 %
+10:12:09   frames: model 42 ms, 128px <3m 2.29 %, flicker 1.58 %
+10:12:09   -> 51 ms (19.5 Hz), 128px <3m 1.44 %, gross 1.09 %, flicker 1.30 %
+10:12:09 [12/30] moge2-l-normal:2400
+10:12:14   depth_estimation: model 71 ms, 128px <3m 1.07 %, flicker 2.09 %
+10:12:16   octomap: model 71 ms, 128px <3m 0.90 %, flicker 0.50 %
+10:12:19   azure_kinect: model 71 ms, 128px <3m 1.85 %, flicker 0.84 %
+10:12:22   frames: model 71 ms, 128px <3m 2.48 %, flicker 1.41 %
+10:12:22   -> 80 ms (12.5 Hz), 128px <3m 1.57 %, gross 1.02 %, flicker 1.21 %
+10:12:22 [13/30] moge3-l:600:refine3
+10:12:28   depth_estimation: model 60 ms, 128px <3m 1.17 %, flicker 1.84 %
+10:12:31   octomap: model 58 ms, 128px <3m 0.83 %, flicker 0.54 %
+10:12:33   azure_kinect: model 60 ms, 128px <3m 1.79 %, flicker 1.07 %
+10:12:36   frames: model 63 ms, 128px <3m 2.57 %, flicker 1.43 %
+10:12:36   -> 70 ms (14.3 Hz), 128px <3m 1.59 %, gross 1.38 %, flicker 1.22 %
+10:12:36 [14/30] moge3-l:1200:refine3
+10:12:41   depth_estimation: model 93 ms, 128px <3m 0.59 %, flicker 1.93 %
+10:12:45   octomap: model 90 ms, 128px <3m 0.89 %, flicker 0.52 %
+10:12:48   azure_kinect: model 94 ms, 128px <3m 1.81 %, flicker 0.92 %
+10:12:52   frames: model 99 ms, 128px <3m 2.43 %, flicker 1.47 %
+10:12:52   -> 102 ms (9.8 Hz), 128px <3m 1.43 %, gross 1.03 %, flicker 1.21 %
+10:12:52 [15/30] moge3-l:2400:refine3
+10:13:01   depth_estimation: model 158 ms, 128px <3m 1.18 %, flicker 1.94 %
+10:13:06   octomap: model 152 ms, 128px <3m 0.94 %, flicker 0.55 %
+10:13:11   azure_kinect: model 159 ms, 128px <3m 1.80 %, flicker 0.91 %
+10:13:17   frames: model 166 ms, 128px <3m 3.07 %, flicker 1.57 %
+10:13:17   -> 168 ms (6.0 Hz), 128px <3m 1.75 %, gross 1.40 %, flicker 1.24 %
+10:13:17 [16/30] moge3-l:1200:refine0
+10:13:21   depth_estimation: model 43 ms, 128px <3m 0.64 %, flicker 1.90 %
+10:13:22   octomap: model 43 ms, 128px <3m 1.03 %, flicker 0.52 %
+10:13:24   azure_kinect: model 43 ms, 128px <3m 1.91 %, flicker 0.90 %
+10:13:26   frames: model 43 ms, 128px <3m 2.50 %, flicker 1.45 %
+10:13:26   -> 52 ms (19.1 Hz), 128px <3m 1.52 %, gross 1.07 %, flicker 1.19 %
+10:13:26 [17/30] moge3-g:600:refine3
+10:16:59   depth_estimation: model 94 ms, 128px <3m 0.65 %, flicker 1.88 %
+10:17:03   octomap: model 93 ms, 128px <3m 0.66 %, flicker 0.55 %
+10:17:06   azure_kinect: model 95 ms, 128px <3m 1.97 %, flicker 0.70 %
+10:17:10   frames: model 97 ms, 128px <3m 1.72 %, flicker 1.40 %
+10:17:10   -> 104 ms (9.6 Hz), 128px <3m 1.25 %, gross 1.20 %, flicker 1.13 %
+10:17:10 [18/30] moge3-g:1200:refine3
+10:17:22   depth_estimation: model 153 ms, 128px <3m 0.81 %, flicker 1.75 %
+10:17:27   octomap: model 150 ms, 128px <3m 0.75 %, flicker 0.55 %
+10:17:32   azure_kinect: model 156 ms, 128px <3m 2.02 %, flicker 1.00 %
+10:17:37   frames: model 159 ms, 128px <3m 2.99 %, flicker 1.54 %
+10:17:37   -> 164 ms (6.1 Hz), 128px <3m 1.64 %, gross 1.51 %, flicker 1.21 %
+10:17:37 [19/30] depthpro2-s:frame
+10:17:39   depth_estimation: model 19 ms, 128px <3m 0.60 %, flicker 2.41 %
+10:17:40   octomap: model 19 ms, 128px <3m 1.74 %, flicker 1.52 %
+10:17:41   azure_kinect: model 19 ms, 128px <3m 1.69 %, flicker 1.77 %
+10:17:42   frames: model 19 ms, 128px <3m 4.06 %, flicker 2.35 %
+10:17:42   -> 28 ms (35.6 Hz), 128px <3m 2.02 %, gross 1.37 %, flicker 2.01 %
+10:17:42 [20/30] depthpro2-s:stream4
+10:17:43   depth_estimation: model 22 ms, 128px <3m 0.84 %, flicker 1.39 %
+10:17:45   octomap: model 22 ms, 128px <3m 2.30 %, flicker 0.52 %
+10:17:46   azure_kinect: model 22 ms, 128px <3m 1.71 %, flicker 0.56 %
+10:17:47   frames: model 22 ms, 128px <3m 4.11 %, flicker 1.21 %
+10:17:47   -> 32 ms (31.7 Hz), 128px <3m 2.24 %, gross 2.25 %, flicker 0.92 %
+10:17:47 [21/30] depthpro2-s:stream16
+10:17:49   depth_estimation: model 36 ms, 128px <3m 0.75 %, flicker 1.22 %
+10:17:50   octomap: model 36 ms, 128px <3m 2.20 %, flicker 0.44 %
+10:17:52   azure_kinect: model 36 ms, 128px <3m 1.65 %, flicker 0.48 %
+10:17:53   frames: model 36 ms, 128px <3m 5.00 %, flicker 1.06 %
+10:17:53   -> 45 ms (22.3 Hz), 128px <3m 2.40 %, gross 3.47 %, flicker 0.80 %
+10:17:53 [22/30] depthpro2-b:frame
+10:18:01   depth_estimation: model 37 ms, 128px <3m 0.71 %, flicker 2.54 %
+10:18:02   octomap: model 37 ms, 128px <3m 1.41 %, flicker 0.87 %
+10:18:04   azure_kinect: model 37 ms, 128px <3m 1.66 %, flicker 1.70 %
+10:18:06   frames: model 37 ms, 128px <3m 2.58 %, flicker 2.93 %
+10:18:06   -> 46 ms (21.6 Hz), 128px <3m 1.59 %, gross 1.19 %, flicker 2.01 %
+10:18:06 [23/30] depthpro2-b:stream4
+10:18:08   depth_estimation: model 43 ms, 128px <3m 0.55 %, flicker 1.54 %
+10:18:10   octomap: model 43 ms, 128px <3m 1.43 %, flicker 0.50 %
+10:18:12   azure_kinect: model 43 ms, 128px <3m 1.56 %, flicker 0.46 %
+10:18:13   frames: model 43 ms, 128px <3m 2.70 %, flicker 1.28 %
+10:18:13   -> 52 ms (19.2 Hz), 128px <3m 1.56 %, gross 1.03 %, flicker 0.94 %
+10:18:13 [24/30] depthpro2-b:stream16
+10:18:16   depth_estimation: model 65 ms, 128px <3m 0.50 %, flicker 1.49 %
+10:18:18   octomap: model 65 ms, 128px <3m 1.30 %, flicker 0.47 %
+10:18:20   azure_kinect: model 65 ms, 128px <3m 1.51 %, flicker 0.47 %
+10:18:23   frames: model 65 ms, 128px <3m 2.51 %, flicker 1.18 %
+10:18:23   -> 75 ms (13.4 Hz), 128px <3m 1.46 %, gross 0.95 %, flicker 0.90 %
+10:18:23 [25/30] depthpro2-l:frame
+10:21:30   depth_estimation: model 88 ms, 128px <3m 0.52 %, flicker 2.22 %
+10:21:33   octomap: model 88 ms, 128px <3m 0.91 %, flicker 0.85 %
+10:21:36   azure_kinect: model 88 ms, 128px <3m 1.71 %, flicker 1.38 %
+10:21:40   frames: model 89 ms, 128px <3m 1.83 %, flicker 2.88 %
+10:21:40   -> 98 ms (10.2 Hz), 128px <3m 1.24 %, gross 0.90 %, flicker 1.83 %
+10:21:40 [26/30] depthpro2-l:stream4
+10:21:44   depth_estimation: model 103 ms, 128px <3m 0.69 %, flicker 1.29 %
+10:21:47   octomap: model 103 ms, 128px <3m 0.96 %, flicker 0.44 %
+10:21:51   azure_kinect: model 103 ms, 128px <3m 1.73 %, flicker 0.46 %
+10:21:54   frames: model 104 ms, 128px <3m 2.26 %, flicker 1.54 %
+10:21:55   -> 112 ms (8.9 Hz), 128px <3m 1.41 %, gross 0.94 %, flicker 0.93 %
+10:21:55 [27/30] depthpro2-l:stream16
+10:22:00   depth_estimation: model 159 ms, 128px <3m 0.48 %, flicker 1.25 %
+10:22:04   octomap: model 160 ms, 128px <3m 0.99 %, flicker 0.42 %
+10:22:09   azure_kinect: model 160 ms, 128px <3m 1.70 %, flicker 0.41 %
+10:22:14   frames: model 160 ms, 128px <3m 2.52 %, flicker 1.51 %
+10:22:14   -> 168 ms (5.9 Hz), 128px <3m 1.42 %, gross 0.96 %, flicker 0.90 %
+10:22:14 [28/30] depthpro2-h:frame
+10:26:15   depth_estimation: model 159 ms, 128px <3m 0.67 %, flicker 1.64 %
+10:26:21   octomap: model 160 ms, 128px <3m 0.75 %, flicker 0.70 %
+10:26:26   azure_kinect: model 161 ms, 128px <3m 1.57 %, flicker 0.74 %
+10:26:31   frames: model 161 ms, 128px <3m 1.70 %, flicker 1.41 %
+10:26:32   -> 170 ms (5.9 Hz), 128px <3m 1.17 %, gross 0.96 %, flicker 1.12 %
+10:26:32 [29/30] depthpro2-h:stream4
+10:26:38   depth_estimation: model 185 ms, 128px <3m 0.76 %, flicker 1.19 %
+10:26:44   octomap: model 186 ms, 128px <3m 0.81 %, flicker 0.42 %
+10:26:50   azure_kinect: model 186 ms, 128px <3m 1.59 %, flicker 0.40 %
+10:26:56   frames: model 187 ms, 128px <3m 1.49 %, flicker 1.10 %
+10:26:57   -> 195 ms (5.1 Hz), 128px <3m 1.16 %, gross 1.05 %, flicker 0.78 %
+10:26:57 [30/30] depthpro2-h:stream16
+10:27:05   depth_estimation: model 279 ms, 128px <3m 0.75 %, flicker 1.18 %
+10:27:13   octomap: model 279 ms, 128px <3m 0.85 %, flicker 0.39 %
+10:27:21   azure_kinect: model 280 ms, 128px <3m 1.61 %, flicker 0.35 %
+10:27:29   frames: model 281 ms, 128px <3m 1.74 %, flicker 1.06 %
+10:27:29   -> 288 ms (3.5 Hz), 128px <3m 1.24 %, gross 1.12 %, flicker 0.75 %
+10:27:29 finished -> /home/spie_si/Documents/main/navigation/mapping/depth_completion/bench/reports/rmc-lx0481_20261127_1009/report.md
