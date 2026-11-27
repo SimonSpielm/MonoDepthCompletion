@@ -179,7 +179,7 @@ def load_recorded(a, frames_path):
         n = len(pred)
     elif a.predict:
         model = load_model(a.predict, a.num_tokens, a.model_device, stream=a.stream, window=a.window)
-        print(f"{a.predict} auf {model.dev} ...")
+        print(f"{a.predict} on {model.dev} ...")
         preds = []
         for i in range(n):
             fx = float(fov[i]) if np.isfinite(fov[i]) else None
@@ -322,7 +322,7 @@ def main():
             raise SystemExit("--preds only works with a single --frames file")
         scenes = [load_recorded(a, p) for p in a.frames]
         frames = [f for sc in scenes for f in sc]
-        print(f"{len(frames)} aufgenommene Frames aus {len(a.frames)} Datei(en)")
+        print(f"{len(frames)} recorded frames from {len(a.frames)} file(s)")
 
     base = {**DEFAULTS, **parse_kv(a.set, multi=False)}
     grid = parse_kv(a.sweep, multi=True)

@@ -67,7 +67,7 @@ def main():
     fus = {k: cfg[k] for k in FUSION_KEYS if k in cfg}
     kw = {k: (int(cfg[k]) if k == "edge_grow" else cfg[k]) for k in FILL_KEYS if k in cfg}
     d_t = torch.from_numpy(depth).to(dev)
-    print(f"Gerät {dev}, Bild {rgb.shape[1]}x{rgb.shape[0]}, fill: {cfg}")
+    print(f"device {dev}, image {rgb.shape[1]}x{rgb.shape[0]}, fill: {cfg}")
 
     def run_fill(pred):
         return fill(d_t, pred, GradientFusion(**fus), **kw)[0]
@@ -78,7 +78,7 @@ def main():
         print(f"fill {ms:6.0f} ms")
         return
 
-    print(f"{'Modell':18s} {'Modell':>8s} {'fill':>6s} {'gesamt':>7s} {'Hz':>5s}")
+    print(f"{'config':18s} {'model':>8s} {'fill':>6s} {'total':>7s} {'Hz':>5s}")
     for spec in a.models:
         name, _, tok = spec.partition(":")
         model = load_model(name, int(tok or 1200), str(dev), stream=not a.per_frame, window=a.window)

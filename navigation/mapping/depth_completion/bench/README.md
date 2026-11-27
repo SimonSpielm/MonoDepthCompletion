@@ -1,28 +1,28 @@
-# Offline-Benchmark für die Tiefenvervollständigung
+# Offline benchmark for the depth completion
 
-Testet **genau den Produktionscode** (`../depth_fusion.py` und `../depth_models.py`, die auch der
-ROS-Knoten `depth_completion_node.py` importiert) ohne ROS, Kamera oder Roboter. Damit lassen sich Parameter und Code-Änderungen deterministisch vergleichen, bevor
-sie auf den Roboter gehen.
+Tests **exactly the production code** (`../depth_fusion.py` and `../depth_models.py`, which the
+ROS node `depth_completion_node.py` also imports) without ROS, camera or robot. Parameters and
+code changes can thus be compared deterministically before they go to the robot.
 
-## Einrichten
+## Setup
 
-Dasselbe conda-Env wie für den ROS-Knoten, siehe [../README.md](../README.md), Abschnitt
-„Installation“. ROS wird für den Benchmark nicht gebraucht. Die Gewichte von Depth Pro 2 sind nur
-für nicht-kommerzielle Forschung freigegeben.
+The same conda env as for the ROS node, see [../README.md](../README.md), section
+"Installation". ROS is not needed for the benchmark. The Depth Pro 2 weights are licensed for
+non-commercial research only.
 
-## Testsuite auf dem Roboter-PC (`run_suite.py`)
+## Test suite on the robot PC (`run_suite.py`)
 
-Lässt alle Modellkonfigurationen auf aufgenommenen Szenen laufen und schreibt einen Bericht zur
-Auswertung. Gemessen wird pro Konfiguration: Laufzeit (Modell, Füllung, gesamt, Hz), GPU-Speicher,
-Genauigkeit (32- und 128-px-Löcher, grobe Fehler, Kantenband) und Flackern bei stillstehender
-Kamera. Standard-Raster (`--list`, 27 Konfigurationen):
+Runs all model configurations on recorded scenes and writes a report for the analysis. Measured
+per configuration: runtime (model, completion, total, Hz), GPU memory, accuracy (32 and 128 px
+holes, gross errors, edge band) and flicker with a static camera. Default grid (`--list`, 27
+configurations):
 
-- MoGe-2 S, B, L, L-normal mit 600, 1200 und 2400 Tokens
-- MoGe-3 L mit Verfeinerung (600, 1200, 2400 Tokens) und ohne (1200), MoGe-3 G (600, 1200)
-- Depth Pro 2 S, B, L, jeweils Einzelbild, Stream Fenster 4 und 16 (H mit `--with-h`)
+- MoGe-2 S, B, L, L-normal with 600, 1200 and 2400 tokens
+- MoGe-3 L with refinement (600, 1200, 2400 tokens) and without (1200), MoGe-3 G (600, 1200)
+- Depth Pro 2 S, B, L, each single frame, streaming window 4 and 16 (H with `--with-h`)
 
-Erst ein kurzer Durchlauf (5 Konfigurationen, etwa 10 Minuten), dann alles (eher 1–2 Stunden).
-Die ROS-Pipeline dabei nicht laufen lassen, sie teilt sich die GPU.
+First a short run (5 configurations, about 10 minutes), then everything (rather 1–2 hours). Do
+not run the ROS pipeline at the same time, it shares the GPU.
 
 ```bash
 python run_suite.py --quick --bags ~/Desktop/rosbags/depth_estimation ~/Desktop/rosbags/octomap/octomap ~/Desktop/rosbags/local_map/azure_kinect
@@ -32,57 +32,55 @@ python run_suite.py --quick --bags ~/Desktop/rosbags/depth_estimation ~/Desktop/
 python run_suite.py --bags ~/Desktop/rosbags/depth_estimation ~/Desktop/rosbags/octomap/octomap ~/Desktop/rosbags/local_map/azure_kinect
 ```
 
-- Bags werden einmal nach `~/depth_suite_data` umgewandelt (30 aufeinanderfolgende Frames, `--n`,
-  `--step`). ROS-1-Bags (`.bag`) gehen auch.
-- Der Bericht landet in `bench/reports/<rechner>_<zeit>/`: `report.md` (Tabelle), `summary.csv`,
-  `results.jsonl` (inklusive Werten pro Aufnahme und Fehlermeldungen), `env.json` (GPU, Treiber,
-  Versionen, Commit), `suite.log`.
-- Bricht der Lauf ab, setzt `--resume bench/reports/<ordner>` an der Stelle fort.
-- Einzelne Konfigurationen: `--only moge2-b:600 moge3-l:1200:refine3 depthpro2-s:stream4`.
-- MoGe-3 mit Verfeinerung braucht `flex_gemm` (Installation Schritt 6); fehlt es, werden diese
-  Konfigurationen als fehlgeschlagen protokolliert und der Rest läuft weiter.
+- Bags are converted once to `~/depth_suite_data` (30 consecutive frames, `--n`, `--step`). ROS 1
+  bags (`.bag`) work as well.
+- The report goes to `bench/reports/<host>_<time>/`: `report.md` (table), `summary.csv`,
+  `results.jsonl` (including per-recording values and error messages), `env.json` (GPU, driver,
+  versions, commit), `suite.log`.
+- If the run aborts, `--resume bench/reports/<folder>` continues where it stopped.
+- Single configurations: `--only moge2-b:600 moge3-l:1200:refine3 depthpro2-s:stream4`.
+- MoGe-3 with refinement needs `flex_gemm` (installation step 6); if it is missing, these
+  configurations are logged as failed and the rest continues.
 
-Zur Auswertung den Berichtsordner committen und pushen, oder gezippt schicken.
+For the analysis, commit and push the report folder, or send it zipped.
 
-## Daten
+## Data
 
-| Quelle | Woher | Wofür |
+| Source | From | For |
 |---|---|---|
-| `--synthetic N` | wird erzeugt | Boden, schräge Wand, Kisten, dünne Stangen. Sensor ToF-artig (Löcher an Kanten, dunkle Flecken, Reichweitenabfall, Mischpixel), Vorhersage MoGe-artig (weiche Kantenrampen, glatter Skalenfehler). Ground Truth überall bekannt. Schnell, gut für Kantenexperimente. |
-| `--frames F.npz --preds P.npz` | `moge_sweep.py capture` und `infer` auf dem Roboter | echte Szenen. `preds.npz` enthält die MoGe-Vorhersagen, MoGe muss dann lokal nicht laufen. |
-| `--frames F.npz --predict depthpro2-s` | wie oben, ohne Vorhersage-Cache | rechnet das Modell lokal (CUDA, Apple MPS oder CPU) und legt `F_preds_<modell>.npz` an. |
-| `bag_to_frames.py BAG --out F.npz` | ROS-1- oder ROS-2-Bag (`pip install rosbags`, kein ROS nötig) | RGB/Tiefe-Paare mit gleichem Zeitstempel, FoV aus `camera_info`. |
+| `--synthetic N` | generated | floor, slanted wall, boxes, thin poles. ToF-like sensor (holes at edges, dark spots, range falloff, mixed pixels), MoGe-like prediction (soft edge ramps, smooth scale error). Ground truth known everywhere. Fast, good for edge experiments. |
+| `--frames F.npz --preds P.npz` | `moge_sweep.py capture` and `infer` on the robot | real scenes. `preds.npz` contains the MoGe predictions, so MoGe does not have to run locally. |
+| `--frames F.npz --predict depthpro2-s` | as above, without a prediction cache | runs the model locally (CUDA, Apple MPS or CPU) and writes `F_preds_<model>.npz`. |
+| `bag_to_frames.py BAG --out F.npz` | ROS 1 or ROS 2 bag (`pip install rosbags`, no ROS needed) | RGB/depth pairs with the same stamp, FoV from `camera_info`. |
 
-`--frames` nimmt mehrere Dateien und mittelt über alle. Die Aufnahmen liegen in `rosbags/frames/`
-(nicht in git).
+`--frames` takes several files and averages over all of them. The recordings are in
+`rosbags/frames/` (not in git).
 
-## Metriken
+## Metrics
 
-Jeder Frame wird mit einer frischen Fusion ausgewertet (ohne Warmstart und EMA), damit Läufe
-vergleichbar sind.
+Each frame is evaluated with a fresh fusion (no warm start and no EMA), so runs are comparable.
 
-- `hold`: allgemeine Genauigkeit. Bei Aufnahmen werden zufällige 32-px-Blöcke gemessener Pixel
-  ausgeblendet (Protokoll der bisherigen Sweeps); synthetisch zählen alle echten Löcher abseits
-  von Kanten.
-- `edge`: Kantenverhalten. Bei Aufnahmen wird ein 6-px-Band um gemessene Tiefenkanten ausgeblendet
-  (das, was der ToF an Kanten tatsächlich verliert); synthetisch zählen alle echten Löcher bis
-  6 px neben einer Kante.
-  - `bleed`: Anteil der Pixel, die mit > 10 % Fehler gefüllt wurden, also schwebende Punkte und
-    Kometenschweife in der Karte. Kleiner ist besser.
-  - `cov`: Anteil der Pixel, die überhaupt einen Wert bekommen. Immer zusammen mit `bleed`
-    lesen: Wer nichts füllt, hat `bleed` 0, aber auch `cov` 0.
-- `<3m`: dieselben Werte nur für Pixel mit Tiefe unter 3 m (`AbsRel`, mittlerer Fehler in `cm`).
-- `--hold-px`: Kantenlänge der ausgeblendeten Blöcke (Standard 32). Mit 128 entstehen große
-  Löcher wie bei schwarzen Objekten oder Glas, weit weg von jeder Messung.
-- `ms`: Median der Laufzeit der Füllung pro Frame auf `--device`. Ist nicht mit der A6000
-  vergleichbar, nur als relatives Maß. Gesamtlaufzeit Modell + Füllung: `speed.py`.
-- `--temporal`: Flackern statt Genauigkeit. Jede `--frames`-Datei läuft als Sequenz mit
-  Gedächtnis wie im Live-Knoten (geglätteter Faktor, Warmstart). Gemessen wird die mittlere
-  relative Änderung zwischen aufeinanderfolgenden Frames: auf gefüllten Pixeln (`filled`, auch
-  unter 3 m), zum Vergleich für das Modell allein (`model`) und für den Sensor (`sensor`). Sinnvoll
-  nur mit Aufnahmen einer stillstehenden Kamera.
+- `hold`: general accuracy. For recordings, random 32 px blocks of measured pixels are hidden
+  (protocol of the earlier sweeps); for synthetic data, all real holes away from edges count.
+- `edge`: behaviour at edges. For recordings, a 6 px band around measured depth edges is hidden
+  (what the ToF actually loses at edges); for synthetic data, all real holes up to 6 px next to an
+  edge count.
+  - `bleed`: fraction of pixels filled with > 10 % error, i.e. floating points and comet tails in
+    the map. Lower is better.
+  - `cov`: fraction of pixels that get a value at all. Always read together with `bleed`: a
+    filler that fills nothing has `bleed` 0, but also `cov` 0.
+- `<3m`: the same values only for pixels with depth below 3 m (`AbsRel`, mean error in `cm`).
+- `--hold-px`: edge length of the hidden blocks (default 32). With 128, large holes appear as on
+  black objects or glass, far from any measurement.
+- `ms`: median runtime of the completion per frame on `--device`. Not comparable with the A6000,
+  only a relative measure. Total runtime model + completion: `speed.py`.
+- `--temporal`: flicker instead of accuracy. Each `--frames` file runs as a sequence with memory
+  as in the live node (smoothed scale, warm start). Measured is the mean relative change between
+  consecutive frames: on filled pixels (`filled`, also below 3 m), for comparison for the model
+  alone (`model`) and for the sensor (`sensor`). Only meaningful with recordings of a static
+  camera.
 
-## Beispiele
+## Examples
 
 ```bash
 python depth_bench.py --synthetic 8
@@ -100,116 +98,117 @@ python depth_bench.py --frames frames.npz --preds preds.npz --set down=8 --csv o
 python depth_bench.py --frames a.npz b.npz --predict moge2-b --num-tokens 600 --limit 15 --temporal
 ```
 
-Mit `--set` und `--sweep` lassen sich alle Parameter von `GradientFusion`
-(`down, lam, mu_near, mu_far, far_band, sigma_edge, z_ref, outlier, iters, tol`) sowie die
-Parameter von `fill` (`ema, edge_jump, edge_grow`) setzen. `edge_jump=0` schaltet den
-Kantenfilter ab. Ohne Angabe gelten die Standardwerte aus `depth_fusion.py` (= Produktion).
+`--set` and `--sweep` set any parameter of `GradientFusion`
+(`down, lam, mu_near, mu_far, far_band, sigma_edge, z_ref, outlier, iters, tol`) and the
+parameters of `fill` (`ema, edge_jump, edge_grow`). `edge_jump=0` switches the edge filter off.
+Without them, the defaults of `depth_fusion.py` (= production) apply.
 
-## Laufzeit
+## Runtime
 
 ```bash
 python speed.py --frames f.npz --models moge2-s:600 moge2-b:600 moge:1200 depthpro2-s
 ```
 
-## Modelle direkt vergleichen
+## Comparing models directly
 
 ```bash
-python compare_models.py bild.jpg --models depthpro2-s depthpro2-b
+python compare_models.py image.jpg --models depthpro2-s depthpro2-b
 ```
 
 ```bash
 python compare_models.py --frames frames.npz --index 0
 ```
 
-Schreibt `compare_models.png`: RGB, je Modell die Tiefe sowie die Kanten (weiß = harter Sprung,
-orange = weiche Rampe). Dazu Laufzeit und Anteil der Rampen-Pixel. Bei Außenszenen zählt weit
-entfernter, flach gesehener Boden ebenfalls als Rampe; aussagekräftig ist die Kennzahl vor allem
-in Innenräumen.
+Writes `compare_models.png`: RGB, and per model the depth and the edges (white = hard jump,
+orange = soft ramp), plus runtime and the fraction of ramp pixels. In outdoor scenes, distant
+floor seen at a grazing angle also counts as a ramp; the number is mainly meaningful indoors.
 
-Gemessen auf einem M4 Pro (MPS): Depth Pro 2 S 130 ms, B 326 ms pro Frame bei 1280×720.
+Measured on an M4 Pro (MPS): Depth Pro 2 S 130 ms, B 326 ms per frame at 1280×720.
 
-## Ergebnisse (6 Aufnahmen, Fusion auf MPS)
+## Results (6 recordings, fusion on MPS)
 
-### Verfahren im Vergleich (MoGe-2 B, 600 Tokens)
+### Methods compared (MoGe-2 B, 600 tokens)
 
-Genauigkeit mit je 2 Frames pro Aufnahme, Flackern mit je 15 aufeinanderfolgenden Frames (13
-bei `rosbag`). Fehler unter 3 m.
+Accuracy with 2 frames per recording, flicker with 15 consecutive frames per recording (13 for
+`rosbag`). Errors below 3 m.
 
-| Verfahren | kleine Löcher | große Löcher (128 px) | Abdeckung klein / groß | Kanten-Bleeding | gefüllte Kantenlöcher | Flackern gefüllt | ms |
+| Method | small holes | large holes (128 px) | coverage small / large | edge bleeding | filled edge holes | flicker filled | ms |
 |---|---|---|---|---|---|---|---|
-| ohne Kantenfilter (Depth Pro 2 S) | 2,48 % | – | – | 20,9 % | 100 % | – | – |
-| alter 3×3-Kantenfilter (Depth Pro 2 S) | 0,86 % | – | – | 3,95 % | 68 % | – | – |
-| Fusion + Ebenenabstand + Stützprüfung (bis Nov. 2026) | 0,40 % | 3,06 % | 87 / 89 % | 0,00 % | 2 % | 1,49 % | 24 |
-| einfach: geglätteter Korrekturfaktor + Kantentest | 0,33–0,35 % | 5,7–7,7 % | 52–67 / 45–60 % | 0,15–0,64 % | 3–24 % | 1,31 % | 4 |
-| Fusion + Kantentest 1/Tiefe, Zone 8 px | 0,30 % | 2,07 % | 81 / 82 % | 0,00 % | 19 % | 1,29 % | 22 |
-| **Fusion + Kantentest 1/Tiefe, Zone 4 px (Standard)** | 0,36 % | 2,40 % | **85 / 86 %** | 0,04 % | **21 %** | 1,36 % | 22 |
+| no edge filter (Depth Pro 2 S) | 2.48 % | – | – | 20.9 % | 100 % | – | – |
+| old 3×3 edge filter (Depth Pro 2 S) | 0.86 % | – | – | 3.95 % | 68 % | – | – |
+| fusion + plane distance + support check (until Nov. 2026) | 0.40 % | 3.06 % | 87 / 89 % | 0.00 % | 2 % | 1.49 % | 24 |
+| simple: smoothed correction factor + edge test | 0.33–0.35 % | 5.7–7.7 % | 52–67 / 45–60 % | 0.15–0.64 % | 3–24 % | 1.31 % | 4 |
+| fusion + edge test in 1/depth, zone 8 px | 0.30 % | 2.07 % | 81 / 82 % | 0.00 % | 19 % | 1.29 % | 22 |
+| **fusion + edge test in 1/depth, zone 4 px (default)** | 0.36 % | 2.40 % | **85 / 86 %** | 0.04 % | **21 %** | 1.36 % | 22 |
 
-- Zone 4 px statt 8 px: 66 % statt 59 % der echten Sensorlöcher werden gefüllt, dafür bleibt ein
-  kleiner Rest Kanten-Bleeding (0,04 %, unter 3 m 0,01 %) und der Fehler steigt leicht.
-- Das einfache Verfahren mittelt den Korrekturfaktor über Kanten hinweg und hat in großen
-  Löchern keine Führung entlang der Flächen; deshalb bleibt die Fusion.
-- Der Kantentest misst den Sprung in 1/Tiefe statt in der Tiefe: Im relativen Tiefensprung galt
-  der flach gesehene Boden ab etwa 2 m als Kante, die Abdeckung sank auf 24–73 %.
-- Flackern: Das Modell allein ändert sich von Frame zu Frame um 1,4–1,6 %, der Sensor um 0,2 %.
-  Keine Variante der Füllung beruhigt das Modell nennenswert; das Flackern kommt vom Modell.
-- Stream-Modus von Depth Pro 2 S (`--stream --window W`, 30 Frames pro Aufnahme): Flackern der
-  gefüllten Tiefe 1,91 % (Einzelbild) → 0,89 % (Fenster 4) → 0,80 % (Fenster 16), Modell allein
-  2,40 → 0,74 → 0,57 %. Laufzeit des Modells auf dem M4 Pro 134 → 184 → 312 ms.
-- Einrasten von Zwischenwerten auf die nähere Seite statt Verwerfen wurde getestet und verworfen
-  (21 % Bleeding, landet oft auf der falschen Seite).
-- Die Fusionsparameter (`down`, `lam`, `sigma_edge`) ändern den Fehler in großen Löchern kaum;
-  er wird vom Modell bestimmt.
+- Zone 4 px instead of 8 px: 66 % instead of 59 % of the real sensor holes are filled; in return
+  a small residue of edge bleeding remains (0.04 %, 0.01 % below 3 m) and the error rises
+  slightly.
+- The simple method averages the correction factor across edges and has no guidance along
+  surfaces in large holes; therefore the fusion stays.
+- The edge test measures the jump in 1/depth instead of depth: with the relative depth jump, the
+  floor seen at a grazing angle counted as an edge from about 2 m on, and coverage dropped to
+  24–73 %.
+- Flicker: the model alone changes by 1.4–1.6 % from frame to frame, the sensor by 0.2 %. No
+  variant of the completion calms the model noticeably; the flicker comes from the model.
+- Streaming mode of Depth Pro 2 S (`--stream --window W`, 30 frames per recording): flicker of the
+  completed depth 1.91 % (single frame) → 0.89 % (window 4) → 0.80 % (window 16), model alone
+  2.40 → 0.74 → 0.57 %. Model runtime on the M4 Pro 134 → 184 → 312 ms.
+- Snapping intermediate values to the nearer side instead of discarding them was tested and
+  rejected (21 % bleeding, often lands on the wrong side).
+- The fusion parameters (`down`, `lam`, `sigma_edge`) hardly change the error in large holes; it
+  is determined by the model.
 
-### Modelle
+### Models
 
-Gemessen noch mit dem früheren Kantenfilter (Ebenenabstand + Stützprüfung) und nicht neu
-gerechnet; mit dem aktuellen Filter für MoGe-2 B siehe oben. Die Laufzeiten enthalten die
-damalige Füllung (24 ms), die aktuelle braucht mit echten Vorhersagen ohne Warmstart 22 ms.
+Measured still with the earlier edge filter (plane distance + support check) and not recomputed;
+for MoGe-2 B with the current filter see above. The runtimes include the completion of that time
+(24 ms); the current one needs 22 ms with real predictions and without warm start.
 
-Modelle, Laufzeit auf M4 Pro (MPS, 1280×720, Modell + Füllung mit 40 CG-Iterationen), Fehler und
-Bleeding unter 3 m:
+Models, runtime on the M4 Pro (MPS, 1280×720, model + completion with 40 CG iterations), error and
+bleeding below 3 m:
 
-| Modell | Tokens | ms | Hz | <3m kleine Löcher | <3m große Löcher (128 px) | edge bleed |
+| Model | Tokens | ms | Hz | <3m small holes | <3m large holes (128 px) | edge bleed |
 |---|---|---|---|---|---|---|
-| MoGe-2 S (vits-normal) | 600 | 85 | 11,8 | 0,43 % / 0,6 cm | 3,80 % / 4,5 cm | 0,00 % |
-| MoGe-2 S | 1200 | 134 | 7,5 | 0,41 % / 0,6 cm | 3,42 % / 4,1 cm | 0,00 % |
-| **MoGe-2 B (vitb-normal)** | **600** | **107** | **9,4** | 0,40 % / 0,6 cm | 3,06 % / 3,7 cm | 0,00 % |
-| MoGe-2 B | 700 | 117 | 8,5 | – | – | – |
-| MoGe-2 B | 1200 | 182 | 5,5 | 0,39 % / 0,6 cm | 2,79 % / 3,2 cm | 0,00 % |
-| MoGe-2 L (vitl, bisher) | 1200 | 306 | 3,3 | 0,37 % / 0,6 cm | 1,89 % / 2,6 cm | 0,00 % |
-| Depth Pro 2 S | – | 153 | 6,5 | 0,43 % / 0,7 cm | 3,35 % / 4,4 cm | 0,00 % |
-| Depth Pro 2 B | – | 348 | 2,9 | 0,41 % / 0,6 cm | 2,24 % / 3,3 cm | 0,00 % |
-| Depth Pro 2 L | – | 1029 | 1,0 | 0,38 % / 0,6 cm | 1,59 % / 2,4 cm | 0,00 % |
+| MoGe-2 S (vits-normal) | 600 | 85 | 11.8 | 0.43 % / 0.6 cm | 3.80 % / 4.5 cm | 0.00 % |
+| MoGe-2 S | 1200 | 134 | 7.5 | 0.41 % / 0.6 cm | 3.42 % / 4.1 cm | 0.00 % |
+| **MoGe-2 B (vitb-normal)** | **600** | **107** | **9.4** | 0.40 % / 0.6 cm | 3.06 % / 3.7 cm | 0.00 % |
+| MoGe-2 B | 700 | 117 | 8.5 | – | – | – |
+| MoGe-2 B | 1200 | 182 | 5.5 | 0.39 % / 0.6 cm | 2.79 % / 3.2 cm | 0.00 % |
+| MoGe-2 L (vitl) | 1200 | 306 | 3.3 | 0.37 % / 0.6 cm | 1.89 % / 2.6 cm | 0.00 % |
+| Depth Pro 2 S | – | 153 | 6.5 | 0.43 % / 0.7 cm | 3.35 % / 4.4 cm | 0.00 % |
+| Depth Pro 2 B | – | 348 | 2.9 | 0.41 % / 0.6 cm | 2.24 % / 3.3 cm | 0.00 % |
+| Depth Pro 2 L | – | 1029 | 1.0 | 0.38 % / 0.6 cm | 1.59 % / 2.4 cm | 0.00 % |
 
-Auf dem M4 Pro ist für 8 Hz MoGe-2 B mit 600 Tokens die Wahl; im Knoten kommen noch Konvertierung
-und Publish hinzu. MoGe-3 braucht für seine Verfeinerung CUDA und wurde hier nicht verglichen. Auf
-dem Roboter gilt die Auswahl unten.
+On the M4 Pro, MoGe-2 B with 600 tokens is the choice for 8 Hz; the node adds conversion and
+publishing. MoGe-3 needs CUDA for its refinement and was not compared here. On the robot, the
+selection below applies.
 
-## Ergebnisse auf dem Roboter (RTX A6000, `run_suite.py`)
+## Results on the robot (RTX A6000, `run_suite.py`)
 
-Bericht: [reports/rmc-lx0481_20261127_1009](reports/rmc-lx0481_20261127_1009/) mit allen 30
-Konfigurationen, 4 Aufnahmen mit je 30 Bildern (drei Bags vom Roboter und die Tuning-Aufnahme),
-Fehler unter 3 m. Plots: `plot_tradeoff.png` (Fehler, grobe Fehler und Flackern über der Rechenzeit)
-und `plot_szenen.png` (pro Aufnahme), RGB der Szenen in `szenen_rgb/`.
+Report: [reports/rmc-lx0481_20261127_1009](reports/rmc-lx0481_20261127_1009/) with all 30
+configurations, 4 recordings with 30 frames each (three bags from the robot and the tuning
+recording), errors below 3 m. Plots: `plot_tradeoff.png` (error, gross errors and flicker over
+runtime) and `plot_scenes.png` (per recording); RGB of the scenes in `scenes_rgb/`.
 
-| Modell | Variante | ms | Hz | 128 px AbsRel | grob | Flackern |
+| Model | Variant | ms | Hz | 128 px AbsRel | gross | flicker |
 |---|---|---|---|---|---|---|
-| MoGe-2 S | 600 | 24 | 42,6 | 2,55 % | 5,14 % | 1,66 % |
-| MoGe-2 B | 600 | 28 | 36,3 | 1,98 % | 3,70 % | 1,54 % |
-| **MoGe-2 L** | **600** | **34** | **29,2** | **1,39 %** | **1,11 %** | **1,24 %** |
-| MoGe-2 L | 1200 | 48 | 20,7 | 1,77 % | 2,35 % | 1,17 % |
-| MoGe-3 L | 1200, Verfeinerung | 102 | 9,8 | 1,43 % | 1,03 % | 1,21 % |
-| MoGe-3 G | 600, Verfeinerung | 104 | 9,6 | 1,25 % | 1,20 % | 1,13 % |
-| Depth Pro 2 B | Stream 4 | 52 | 19,2 | 1,56 % | 1,03 % | 0,94 % |
-| Depth Pro 2 L | Einzelbild | 98 | 10,2 | 1,24 % | 0,90 % | 1,83 % |
-| Depth Pro 2 H | Stream 4 | 195 | 5,1 | 1,16 % | 1,05 % | 0,78 % |
+| MoGe-2 S | 600 | 24 | 42.6 | 2.55 % | 5.14 % | 1.66 % |
+| MoGe-2 B | 600 | 28 | 36.3 | 1.98 % | 3.70 % | 1.54 % |
+| **MoGe-2 L** | **600** | **34** | **29.2** | **1.39 %** | **1.11 %** | **1.24 %** |
+| MoGe-2 L | 1200 | 48 | 20.7 | 1.77 % | 2.35 % | 1.17 % |
+| MoGe-3 L | 1200, refinement | 102 | 9.8 | 1.43 % | 1.03 % | 1.21 % |
+| MoGe-3 G | 600, refinement | 104 | 9.6 | 1.25 % | 1.20 % | 1.13 % |
+| Depth Pro 2 B | stream 4 | 52 | 19.2 | 1.56 % | 1.03 % | 0.94 % |
+| Depth Pro 2 L | single frame | 98 | 10.2 | 1.24 % | 0.90 % | 1.83 % |
+| Depth Pro 2 H | stream 4 | 195 | 5.1 | 1.16 % | 1.05 % | 0.78 % |
 
-- Die Fusion braucht auf der A6000 9 ms; 24 der 30 Konfigurationen schaffen 8 Hz.
-- Kleine Löcher (32 px) füllen alle Modelle mit 0,40–0,49 %.
-- MoGe-2 S und B machen vor allem auf der Tuning-Aufnahme viele grobe Fehler (bis 17 %).
-- Mehr Tokens bringen keinen einheitlichen Gewinn, die MoGe-3-Verfeinerung wenig bei doppelter Zeit.
-- Der Stream-Modus von Depth Pro 2 halbiert das Flackern; bei S kostet er Genauigkeit.
-- **Standard im ROS-Knoten ist deshalb MoGe-2 L mit 600 Tokens.** Wenn das Flackern wichtiger ist
-  als die Lizenz: Depth Pro 2 B im Stream-Modus.
-- Unterschiede unter etwa 0,3 Prozentpunkten zwischen den großen Modellen sind mit 2 Hold-out-Bildern
-  pro Aufnahme nicht belastbar.
+- The completion needs 9 ms on the A6000; 24 of the 30 configurations reach 8 Hz.
+- All models fill small holes (32 px) with 0.40–0.49 %.
+- MoGe-2 S and B make many gross errors, mainly on the tuning recording (up to 17 %).
+- More tokens bring no consistent gain; the MoGe-3 refinement brings little at twice the time.
+- The streaming mode of Depth Pro 2 halves the flicker; for S it costs accuracy.
+- **The default of the ROS node is therefore MoGe-2 L with 600 tokens.** If flicker matters more
+  than the licence: Depth Pro 2 B in streaming mode.
+- Differences below about 0.3 percentage points between the large models are not reliable with
+  2 held-out frames per recording.

@@ -5,14 +5,22 @@ Integrates the filtered depth of camera_frame_filter.py (same data as
 /camera/filtered/points, but as image: nvblox_torch integrates depth images
 projectively). The camera pose is looked up in TF at the frame's original stamp.
 Publishes the occupied voxels around the camera as /nvblox/occupied_points_rgb.
+
+Communication (rules in pipeline_io.py): one thread, no timer. Each new filtered depth image
+triggers integration, the query of the occupied voxels and the publish of the point cloud; while
+this runs, DDS keeps only the newest depth image. camera_info comes latched from the bridge. The
+colour image for the point colours comes directly from the bridge and is looked up by the stamp
+of the integrated depth (ColorByStamp); without it the points are grey. The LN reset service is
+polled at every frame, so it is only served while frames arrive.
 """
+import time
+
 import links_and_nodes as ln
 import numpy as np
 import torch
 import torch.nn.functional as F
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -24,16 +32,19 @@ from cv_bridge import CvBridge
 
 from robotutils.geom.se3 import pose2tf
 
+from navigation.mapping.pipeline_io import (COLOR_TOPIC, FILTERED_DEPTH_TOPIC, INFO_TOPIC, ColorByStamp,
+                                            StageMonitor, qos_latched, qos_trigger)
+
 from nvblox_torch.mapper import Mapper, QueryType
 from nvblox_torch.projective_integrator_types import ProjectiveIntegratorType
 from nvblox_torch.sensor import Sensor
 
 def make_local_offsets(half_xy: float, z_min: float, z_max: float, vs: float):
     """
-    Offsets der Voxelzentren relativ zu einem Grid-Ursprung, der auf einem
-    Vielfachen von vs liegt. Zentren bei (i + 0.5) * vs -> exakt nvblox-Voxelzentren.
-    Gibt (offsets (N, 3), Gitterform (nx, ny, nz)) zurück; die Reihenfolge ist x-y-z
-    (meshgrid "ij"), offsets.view(nx, ny, nz, 3) ist also wieder das 3D-Gitter.
+    Offsets of the voxel centres relative to a grid origin that lies on a multiple of vs.
+    Centres at (i + 0.5) * vs -> exactly the nvblox voxel centres.
+    Returns (offsets (N, 3), grid shape (nx, ny, nz)); the order is x-y-z (meshgrid "ij"), so
+    offsets.view(nx, ny, nz, 3) is the 3D grid again.
     """
     n_xy = int(round(half_xy / vs))
     ixy = torch.arange(-n_xy, n_xy, dtype=torch.float32)
@@ -42,7 +53,7 @@ def make_local_offsets(half_xy: float, z_min: float, z_max: float, vs: float):
 
     X, Y, Z = torch.meshgrid(ixy, ixy, iz, indexing="ij")
     offs = torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)], dim=1)
-    return (offs + 0.5) * vs, X.shape          # z ist hier bereits absolut (global_frame)
+    return (offs + 0.5) * vs, X.shape          # z is already absolute here (global_frame)
 
 
 def create_pointcloud2_xyzrgb(points_xyz, colors_rgb, frame_id, stamp) -> PointCloud2:
@@ -99,29 +110,28 @@ class TsdfOccupiedColoredPointCloud(Node):
         super().__init__("nvblox_tsdf_occupied_colored_pc")
 
         # -------- parameters --------
-        self.declare_parameter("depth_topic", "camera/filtered/depth/image_raw")   # camera_frame_filter.py
-        self.declare_parameter("camera_info_topic", "camera/completed/camera_info")
-        self.declare_parameter("rgb_topic", "camera/completed/color/image_raw")   # muss auf Depth registriert sein!
+        self.declare_parameter("depth_topic", FILTERED_DEPTH_TOPIC)   # camera_frame_filter.py
+        self.declare_parameter("camera_info_topic", INFO_TOPIC)       # bridge, latched
+        self.declare_parameter("rgb_topic", COLOR_TOPIC)              # bridge; must be registered to the depth, "" = grey
 
         self.declare_parameter("camera_frame", "camera")
         self.declare_parameter("global_frame", "map")
 
         self.declare_parameter("voxel_size", 0.02)
-        self.declare_parameter("publish_hz", 10.0)
 
-        # lokales Query-Fenster um die Kamera (Map selbst ist unbegrenzt)
+        # local query window around the camera (the map itself is unbounded)
         self.declare_parameter("query_half_extent_xy", 8.0)   # -> 3 x 3 m
-        self.declare_parameter("query_z_range", [-0.5, 2.0])  # absolut im global_frame
+        self.declare_parameter("query_z_range", [-0.5, 2.0])  # absolute, in global_frame
 
         # occupied: (w > w_min) & (dist < occ_band_vox * voxel_size)
-        #   unknown (w == 0) zählt als frei
-        #   occ_band_vox = 0.5 -> auch der Voxel knapp VOR der Oberfläche zählt (keine Lücken bei dünnen Objekten)
-        #   occ_band_vox = 0.0 -> nur Voxel hinter der Oberfläche
+        #   unknown (w == 0) counts as free
+        #   occ_band_vox = 0.5 -> the voxel just IN FRONT of the surface counts too (no gaps in thin objects)
+        #   occ_band_vox = 0.0 -> only voxels behind the surface
         self.declare_parameter("w_min", 0.5)
         self.declare_parameter("occ_band_vox", 0.5)
 
-        # Speckle-Filter: belegte Voxel mit weniger als min_neighbors belegten Nachbarn
-        # (26er-Nachbarschaft) werden verworfen. 0 = aus, 1 = nur ganz isolierte Voxel.
+        # speckle filter: occupied voxels with fewer than min_neighbors occupied neighbours
+        # (26-neighbourhood) are dropped. 0 = off, 1 = only fully isolated voxels.
         self.declare_parameter("min_neighbors", 1)
 
         self.declare_parameter("max_points", 300000)
@@ -135,7 +145,6 @@ class TsdfOccupiedColoredPointCloud(Node):
         self.camera_frame = gp("camera_frame")
         self.global_frame = gp("global_frame")
         self.voxel_size = float(gp("voxel_size"))
-        self.publish_hz = float(gp("publish_hz"))
         self.half_xy = float(gp("query_half_extent_xy"))
         z_min, z_max = (float(v) for v in gp("query_z_range"))
         self.w_min = float(gp("w_min"))
@@ -151,11 +160,10 @@ class TsdfOccupiedColoredPointCloud(Node):
 
         # -------- ROS IO --------
         self.bridge = CvBridge()
-        self.sub_info = self.create_subscription(CameraInfo, self.info_topic, self.on_info, 10)
-        self.sub_depth = self.create_subscription(Image, self.depth_topic, self.on_depth, qos_profile_sensor_data)
-        self.sub_rgb = None
-        if self.rgb_topic:
-            self.sub_rgb = self.create_subscription(Image, self.rgb_topic, self.on_rgb, qos_profile_sensor_data)
+        self.sub_info = self.create_subscription(CameraInfo, self.info_topic, self.on_info, qos_latched())
+        self.sub_depth = self.create_subscription(Image, self.depth_topic, self.on_depth, qos_trigger())
+        self.colors = ColorByStamp(self, self.rgb_topic) if self.rgb_topic else None
+        self.monitor = StageMonitor(self.get_logger().info, "nvblox")
         self.pub_pc = self.create_publisher(PointCloud2, self.pc_topic, 1)
 
         # -------- nvblox --------
@@ -171,20 +179,18 @@ class TsdfOccupiedColoredPointCloud(Node):
         reset_svc.set_handler(self._svc_reset_map)
         reset_svc.do_register()
 
-        # lokale Offsets einmal auf der GPU vorberechnen
+        # precompute the local offsets once on the GPU
         self.local_offsets, self.grid_shape = make_local_offsets(self.half_xy, z_min, z_max, self.voxel_size)
         self.local_offsets = self.local_offsets.to("cuda")
         self.get_logger().info(f"Query window: {self.local_offsets.shape[0] / 1e6:.1f} Mio. points")
 
         # Zustand
-        self.last_rgb_msg: Image | None = None
         self.last_T_wc: torch.Tensor | None = None
         self.last_stamp = None
         self.fx = self.fy = self.cx = self.cy = None
         self._depth_gpu: torch.Tensor | None = None
         self._depth_cpu_pinned: torch.Tensor | None = None
 
-        self.timer = self.create_timer(1.0 / max(self.publish_hz, 1e-6), self.on_step)
 
     # ------------------------------------------------------------------
     def on_info(self, msg: CameraInfo):
@@ -194,9 +200,6 @@ class TsdfOccupiedColoredPointCloud(Node):
                                          width=int(msg.width), height=int(msg.height))
         self.get_logger().info("CameraInfo OK")
         self.destroy_subscription(self.sub_info)
-
-    def on_rgb(self, msg: Image):
-        self.last_rgb_msg = msg
 
     def lookup_T_global_cam(self, stamp):
         try:
@@ -215,13 +218,17 @@ class TsdfOccupiedColoredPointCloud(Node):
             self._depth_cpu_pinned = torch.empty((h, w), dtype=torch.float32, pin_memory=True)
             self._depth_gpu = torch.empty((h, w), dtype=torch.float32, device="cuda")
 
-    # ---- Integration: jedes Tiefenbild genau einmal ----
+    # ---- trigger: every new depth image is integrated once, then the map is published ----
     def on_depth(self, msg: Image):
+        self.ln_clnt.wait_and_handle_service_group_requests(None, 0)   # reset service, non-blocking
+        self.monitor.received()
         if self.sensor is None or msg.header.stamp == self.last_stamp:
             return
         T_wc = self.lookup_T_global_cam(msg.header.stamp)
         if T_wc is None:
+            self.monitor.count("no_tf")
             return
+        t0 = time.perf_counter()
 
         depth_mm = self.bridge.imgmsg_to_cv2(msg, desired_encoding="16UC1")
         self._ensure_depth_buffers(*depth_mm.shape[:2])
@@ -231,10 +238,14 @@ class TsdfOccupiedColoredPointCloud(Node):
         self.mapper.add_depth_frame(self._depth_gpu, T_wc, self.sensor, mapper_id=0)
         self.last_stamp = msg.header.stamp
         self.last_T_wc = T_wc
+        t1 = time.perf_counter()
+        self.publish_map(msg.header.stamp)
+        self.monitor.published(msg.header.stamp, integrate=1000 * (t1 - t0),
+                               query=1000 * (time.perf_counter() - t1))
 
     # ---- Abfrage + Publish ----
     def _colorize(self, pts: np.ndarray, rgb_img: np.ndarray, T_wc: torch.Tensor) -> np.ndarray:
-        """Nur Punkte im aktuellen Sichtfeld bekommen Farbe, der Rest grau."""
+        """Only points in the current field of view get a colour, the rest stays grey."""
         colors = np.full((pts.shape[0], 3), 180, dtype=np.uint8)
         H, W = rgb_img.shape[:2]
         T_cw = torch.linalg.inv(T_wc)
@@ -261,24 +272,22 @@ class TsdfOccupiedColoredPointCloud(Node):
             svc.respond()
 
     def _remove_speckles(self, occupied: torch.Tensor) -> torch.Tensor:
-        """Isolierte Voxel entfernen: Nachbarn zählen per 3x3x3-Mittelwert auf der GPU.
+        """Remove isolated voxels: count neighbours with a 3x3x3 mean on the GPU.
 
-        Ein Pooling über das Abfragegitter (~5 Mio. Voxel) dauert auf der GPU unter einer
-        Millisekunde und ist damit klein gegen query_layer. Voxel am Fensterrand haben
-        weniger Nachbarn und fallen dort etwas leichter heraus.
+        One pooling over the query grid (~5 M voxels) takes less than a millisecond on the GPU,
+        small against query_layer. Voxels at the window border have fewer neighbours and drop
+        out slightly more easily there.
         """
         occ = occupied.view(1, 1, *self.grid_shape).to(torch.float16)
         n_nb = F.avg_pool3d(occ, 3, stride=1, padding=1, count_include_pad=True) * 27 - occ
         return occupied & (n_nb.view(-1) > self.min_neighbors - 0.5)
 
-    def on_step(self):
-        self.ln_clnt.wait_and_handle_service_group_requests(None, 0)
-
+    def publish_map(self, stamp):
         if self.last_T_wc is None:
             return
         T_wc = self.last_T_wc
 
-        # Grid-Ursprung auf Voxelraster einrasten (nur xy, z ist absolut)
+        # snap the grid origin to the voxel raster (xy only, z is absolute)
         vs = self.voxel_size
         cx = round(float(T_wc[0, 3]) / vs) * vs
         cy = round(float(T_wc[1, 3]) / vs) * vs
@@ -300,9 +309,10 @@ class TsdfOccupiedColoredPointCloud(Node):
         pts = query_pts.index_select(0, idx).cpu().numpy()
 
         colors = np.full((pts.shape[0], 3), 180, dtype=np.uint8)
-        if self.last_rgb_msg is not None and self.fx is not None:
+        rgb_msg = self.colors.get(stamp) if self.colors is not None else None
+        if rgb_msg is not None and self.fx is not None:
             try:
-                rgb_img = self.bridge.imgmsg_to_cv2(self.last_rgb_msg, desired_encoding="rgb8")
+                rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
                 colors = self._colorize(pts, rgb_img, T_wc)
             except Exception as e:
                 self.get_logger().warn(f"Colorize failed: {e}", throttle_duration_sec=5.0)

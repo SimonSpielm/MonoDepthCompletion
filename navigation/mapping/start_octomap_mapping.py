@@ -13,13 +13,13 @@ def generate_launch_description():
             emulate_tty=True, #helps for printing
 
             parameters=[{
-                # --- Auflösung & Frames ---
+                # --- resolution & frames ---
                 "resolution": 0.02,
                 #"world_frame_id": "map",
                 "base_frame_id": "ground",       # only for ground-filter
                 "frame_id": "map",
 
-                # --- Sensor-Modell ---
+                # --- sensor model ---
                 "sensor_model.hit": 0.85,
                 "sensor_model.miss": 0.25,
                 "sensor_model.min": 0.12,
@@ -30,14 +30,14 @@ def generate_launch_description():
                 "point_cloud_min_z": -3.0,
                 "point_cloud_max_z":  3.0,
 
-                # --- Filter / Qualität ---
+                # --- filters / quality ---
                 "filter_speckles": True,
-                "filter_ground_plane": False,     # ground filter aus = weniger Rechenaufwand
+                "filter_ground_plane": False,     # ground filter off = less computation
                 "ground_filter.distance": 0.1,
                 "ground_filter.angle":    0.1,
                 "ground_filter.plane_distance": 0.05,
 
-                # --- Map-Speicher / Kompression ---
+                # --- map storage / compression ---
                 "compress_map": False,       # schneller, braucht mehr RAM; True = kleiner, langsamer
 
                 # --- 2D-Map & weitere Outputs ---
@@ -59,7 +59,7 @@ def generate_launch_description():
                 ('cloud_in', '/camera/filtered/points')   # camera_frame_filter.py,
             ],
 
-            # Log-Level runterdrehen, wenn alles tut:
+            # lower the log level once everything works:
             arguments=['--ros-args', '--log-level', 'octomap_server:=debug'],
         )
     ])

@@ -2,21 +2,21 @@
 r"""
 Step 3: depth completion with a monocular model (ROS 2, GPU, no visualisation).
 
-Fills the holes of the sensor depth and publishes the completed depth together with the
-matching RGB image and camera_info, all with the ORIGINAL header (stamp = LN capture time,
-frame_id = camera):
+Fills the holes of the sensor depth and publishes only the completed depth, with the ORIGINAL
+header (stamp = LN capture time, frame_id = camera):
 
-    /camera/depth/image_raw   (trigger)     --\                       /camera/completed/depth/image_raw (16UC1, mm)
-    /camera/color/image_raw   (model input)  >-- model + fusion -->  /camera/completed/color/image_raw
-    /camera/color/camera_info (FoV, static) --/                       /camera/completed/camera_info
+    /camera/depth/image_raw   (trigger)      --\
+    /camera/color/image_raw   (model input)   >-- model + fusion -->  /camera/completed/depth/image_raw
+    /camera/color/camera_info (FoV, latched) --/                       (16UC1, mm)
 
-The depth image is the only trigger, there is no message_filters synchronizer. The model
-estimates depth FROM the RGB image, so RGB is still needed as input: it is kept in a small
-buffer and looked up by the stamp of the depth image (the bridge stamps both with the same LN
-capture time). A lost RGB message therefore only costs that one frame and never stalls the
-stream. The RGB image used for a frame is re-published next to its completed depth, so
-downstream nodes (filter, nvblox colouring) get color, depth and camera_info with one identical
-stamp and need no pairing of their own.
+Colour and camera_info are not re-published: downstream stages take them from the bridge and
+match the colour image by stamp (pipeline_io.ColorByStamp).
+
+One thread, no timer, no synchroniser. The node keeps the last colour image and the last depth
+image; whenever one of them arrives and both have the same stamp (the bridge stamps both with
+the LN capture time), the frame is processed inside that callback. A depth image that arrives
+before its colour image therefore simply waits for it. While a frame is processed, DDS keeps
+only the newest depth image (QoS keep last 1), so older frames are dropped instead of queued.
 
 Pipeline (details in README.md and depth_fusion.py):
 1. The model (MODEL, see depth_models.py) predicts metric depth, using the real focal length
@@ -26,11 +26,8 @@ Pipeline (details in README.md and depth_fusion.py):
    smooth along surfaces (the model provides the shape), does not act across edges and decays
    to 0 behind the measured range. Solved with preconditioned CG on the GPU. Measured pixels
    are never changed.
-4. Edge filters against floating points: filled pixels on the model's smeared edge (too steep
-   for a real surface) and pixels in the zone around real depth edges that match neither the
-   near nor the far side are discarded.
-
-The model is slower than the camera: only the newest frame is processed, older ones are dropped.
+4. Edge filter against floating points: filled pixels next to jumps in inverse depth are
+   discarded.
 
 Usage (conda env with torch and the model package, ROS sourced):
     python navigation/mapping/depth_completion/depth_completion_node.py
@@ -45,16 +42,13 @@ if os.path.isdir(_ROS) and _ROS not in sys.path:
 os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
 import math
-import threading
 import time
-from collections import OrderedDict
 
 import cv2
 import numpy as np
 import rclpy
 import torch
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
 # Model (depth_models.MODELS) / resolution. Measured on the robot's RTX A6000, 1280x720, incl.
@@ -66,19 +60,16 @@ MODEL = "moge"
 NUM_TOKENS = 600
 STREAM = True         # Depth Pro 2 only: streaming mode (attends to previous frames, steadier)
 STREAM_WINDOW = 4     # frames attended incl. the current one (M4 Pro, S: 4 -> 184 ms, 16 -> 312 ms; 16 adds gross errors)
-COLOR_TOPIC = "/camera/color/image_raw"
-DEPTH_TOPIC = "/camera/depth/image_raw"
-INFO_TOPIC = "/camera/color/camera_info"
-OUT_DEPTH_TOPIC = "/camera/completed/depth/image_raw"
-OUT_COLOR_TOPIC = "/camera/completed/color/image_raw"
-OUT_INFO_TOPIC = "/camera/completed/camera_info"
-RGB_BUFFER = 10        # last received RGB images, looked up by stamp (~0.7 s at 15 Hz)
 
 
-# algorithm (ROS-free, also used by the offline benchmark)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# algorithm (ROS-free, also used by the offline benchmark) and the shared pipeline rules
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 from depth_fusion import GradientFusion, fill  # noqa: E402
 from depth_models import load_model  # noqa: E402
+from pipeline_io import (COLOR_TOPIC, COMPLETED_DEPTH_TOPIC, DEPTH_TOPIC, INFO_TOPIC,  # noqa: E402
+                         StageMonitor, qos_buffer, qos_latched, qos_trigger, same_stamp)
 
 # ---------------------------------------------------------------- ROS
 
@@ -108,137 +99,74 @@ def depth_to_msg(depth_mm, header):
     return msg
 
 
-def stamp_key(stamp):
-    return (stamp.sec, stamp.nanosec)
-
-
 class DepthCompletion(Node):
-    def __init__(self):
+    def __init__(self, model):
         super().__init__("depth_completion")
-        self.lock = threading.Lock()
-        self.new_frame = threading.Event()
-        self.latest_depth = None             # newest depth not yet processed (trigger)
-        self.rgb_buffer = OrderedDict()      # stamp -> RGB message
+        self.model = model
+        self.fusion = GradientFusion()
+        self.log_s = None                    # smoothed log global scale
+        self.rgb_msg = None                  # last colour image
+        self.depth_msg = None                # last depth image not processed yet
         self.info_msg = None                 # static, only for the focal length
-        self._n_depth = 0
+        self.monitor = StageMonitor(self.get_logger().info, "completion")
 
-        self.create_subscription(Image, DEPTH_TOPIC, self.depth_cb, qos_profile_sensor_data)
-        self.create_subscription(Image, COLOR_TOPIC, self.rgb_cb, qos_profile_sensor_data)
-        self.create_subscription(CameraInfo, INFO_TOPIC, self.info_cb, qos_profile_sensor_data)
+        self.create_subscription(Image, DEPTH_TOPIC, self.on_depth, qos_trigger())
+        self.create_subscription(Image, COLOR_TOPIC, self.on_rgb, qos_buffer())
+        self.create_subscription(CameraInfo, INFO_TOPIC, self.on_info, qos_latched())
+        self.pub_depth = self.create_publisher(Image, COMPLETED_DEPTH_TOPIC, qos_trigger())
 
-        self.pub_depth = self.create_publisher(Image, OUT_DEPTH_TOPIC, 1)
-        self.pub_color = self.create_publisher(Image, OUT_COLOR_TOPIC, 1)
-        self.pub_info = self.create_publisher(CameraInfo, OUT_INFO_TOPIC, 1)
-
-    def info_cb(self, msg):
+    def on_info(self, msg):
         self.info_msg = msg
 
-    def rgb_cb(self, msg):
-        with self.lock:
-            self.rgb_buffer[stamp_key(msg.header.stamp)] = msg
-            while len(self.rgb_buffer) > RGB_BUFFER:
-                self.rgb_buffer.popitem(last=False)
-        self.new_frame.set()     # the matching depth may already be waiting
+    def on_rgb(self, msg):
+        self.rgb_msg = msg
+        self.try_process()
 
-    def depth_cb(self, msg):
-        with self.lock:
-            self.latest_depth = msg          # drop the older, unprocessed depth
-            self._n_depth += 1
-        self.new_frame.set()
+    def on_depth(self, msg):
+        self.monitor.received()
+        self.depth_msg = msg                 # a newer depth replaces an unprocessed older one
+        self.try_process()
 
-    def take_depth_count(self):
-        with self.lock:
-            n, self._n_depth = self._n_depth, 0
-        return n
+    def try_process(self):
+        d, c = self.depth_msg, self.rgb_msg
+        if d is None or c is None or self.info_msg is None or not same_stamp(d.header.stamp, c.header.stamp):
+            return
+        self.depth_msg = None
+        self.process(c, d)
 
-    def take(self, timeout=0.5):
-        """Newest depth + the RGB image with the identical stamp, otherwise None.
+    def process(self, color_msg, depth_msg):
+        sync = {"cuda": torch.cuda.synchronize, "mps": torch.mps.synchronize}.get(self.model.dev.type, lambda: None)
+        t0 = time.perf_counter()
+        rgb, depth = to_rgb(color_msg), to_depth(depth_msg)
+        H, W = rgb.shape[:2]
+        if depth.shape != (H, W):
+            depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
+        fov_x = math.degrees(2 * math.atan(self.info_msg.width / (2 * self.info_msg.k[0])))
+        t1 = time.perf_counter()
 
-        If the RGB image has not arrived yet (order of arrival), the depth is kept until it
-        arrives or a newer depth replaces it.
-        """
-        if not self.new_frame.wait(timeout):
-            return None
-        with self.lock:
-            self.new_frame.clear()
-            depth = self.latest_depth
-            if depth is None:
-                return None
-            rgb = self.rgb_buffer.get(stamp_key(depth.header.stamp))
-            if rgb is None:
-                return None
-            self.latest_depth = None
-        return rgb, depth
+        pred = self.model(rgb, fov_x)
+        sync()
+        t2 = time.perf_counter()
 
-    def publish(self, color_msg, depth_mm, info_msg, header):
-        # color = exactly the RGB image the depth was estimated from (same stamp);
-        # camera_info gets the same stamp
-        info_msg.header.stamp = header.stamp
-        self.pub_color.publish(color_msg)
-        self.pub_depth.publish(depth_to_msg(depth_mm, header))
-        self.pub_info.publish(info_msg)
+        filled, self.log_s = fill(torch.from_numpy(depth).to(pred.device), pred, self.fusion, self.log_s)
+        depth_mm = (filled * 1000.0).round().clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
+        t3 = time.perf_counter()
 
+        self.pub_depth.publish(depth_to_msg(depth_mm, depth_msg.header))
+        t4 = time.perf_counter()
+        self.monitor.published(depth_msg.header.stamp, convert=1000 * (t1 - t0), model=1000 * (t2 - t1),
+                               fusion=1000 * (t3 - t2), publish=1000 * (t4 - t3))
 
-# ---------------------------------------------------------------- main loop
 
 def main():
-    print(f"Lade {MODEL} ({NUM_TOKENS} Tokens) ...")
-    moge = load_model(MODEL, NUM_TOKENS, stream=STREAM, window=STREAM_WINDOW)
-    if moge.dev.type == "cpu":
-        print("WARNUNG: keine GPU, Modell und Fusion laufen auf der CPU (sehr langsam).")
+    print(f"Loading {MODEL} ({NUM_TOKENS} tokens) ...")
+    model = load_model(MODEL, NUM_TOKENS, stream=STREAM, window=STREAM_WINDOW)
+    if model.dev.type == "cpu":
+        print("WARNING: no GPU, model and fusion run on the CPU (very slow).")
     rclpy.init()
-    node = DepthCompletion()
-    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
-
-    fusion = GradientFusion()
-    log_s = None
-    t_sum, n_sum = {k: 0.0 for k in ("Konvert.", "MoGe", "Fusion", "Publish")}, 0
-    last = time.perf_counter()
-
-    def tick(key, t0):
-        t1 = time.perf_counter()
-        t_sum[key] += 1000 * (t1 - t0)
-        return t1
-
+    node = DepthCompletion(model)
     try:
-        while rclpy.ok():
-            frame = node.take()
-            info_msg = node.info_msg
-            if frame is None or info_msg is None:   # no pair / no camera_info yet
-                continue
-            color_msg, depth_msg = frame
-            t = time.perf_counter()
-            rgb, depth = to_rgb(color_msg), to_depth(depth_msg)
-            H, W = rgb.shape[:2]
-            if depth.shape != (H, W):
-                depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
-            fov_x = math.degrees(2 * math.atan(info_msg.width / (2 * info_msg.k[0])))
-            t = tick("Konvert.", t)
-
-            pred = moge(rgb, fov_x)
-            if moge.dev.type == "cuda":
-                torch.cuda.synchronize()
-            elif moge.dev.type == "mps":
-                torch.mps.synchronize()
-            t = tick("MoGe", t)
-
-            filled, log_s = fill(torch.from_numpy(depth).to(pred.device), pred, fusion, log_s)
-            depth_mm = (filled * 1000.0).round().clamp(0, 65535).to(torch.int32).cpu().numpy() \
-                .astype(np.uint16)
-            t = tick("Fusion", t)
-
-            node.publish(color_msg, depth_mm, info_msg, depth_msg.header)
-            tick("Publish", t)
-
-            n_sum += 1
-            now = time.perf_counter()
-            if now - last >= 2.0:   # averages of the last ~2 s to the console
-                dt = now - last
-                a = {k: v / max(n_sum, 1) for k, v in t_sum.items()}
-                print(f"Tiefe in {node.take_depth_count() / dt:5.1f} Hz | verarb. {n_sum / dt:5.1f} Hz "
-                      f"| s={math.exp(log_s):.2f} | "
-                      + " | ".join(f"{k} {v:.1f}" for k, v in a.items()) + " ms", flush=True)
-                t_sum, n_sum, last = dict.fromkeys(t_sum, 0.0), 0, now
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:

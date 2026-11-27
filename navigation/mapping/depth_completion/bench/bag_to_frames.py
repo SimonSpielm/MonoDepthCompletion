@@ -52,11 +52,11 @@ def read_bag(bag, max_pairs=60, step=1, color=COLOR, depth=DEPTH, info=INFO):
                 depths[stamp(m)] = image(m)
     keys = sorted(set(rgbs) & set(depths))[::step][:max_pairs]
     if not keys:
-        raise SystemExit(f"{bag}: keine RGB/Tiefe-Paare mit gleichem Zeitstempel gefunden")
+        raise SystemExit(f"{bag}: no RGB/depth pairs with identical stamps found")
     rgb = np.stack([rgbs[k] for k in keys])
     dep = np.stack([depths[k] for k in keys])
     if dep.shape[1:] != rgb.shape[1:3]:
-        raise SystemExit(f"{bag}: Tiefe {dep.shape[1:]} nicht auf RGB {rgb.shape[1:3]} registriert")
+        raise SystemExit(f"{bag}: depth {dep.shape[1:]} is not registered to RGB {rgb.shape[1:3]}")
     return rgb, dep, (fov if fov else float("nan")), len(rgbs), len(depths)
 
 
@@ -72,7 +72,7 @@ def main():
     a = ap.parse_args()
     rgb, depth, fov, n_rgb, n_depth = read_bag(a.bag, a.max, a.step, a.color, a.depth, a.info)
     np.savez(a.out, rgb=rgb, depth=depth, fov_x=np.full(len(rgb), fov))
-    print(f"{len(rgb)} Paare ({n_rgb} RGB, {n_depth} Tiefe), {rgb.shape[2]}x{rgb.shape[1]}, "
+    print(f"{len(rgb)} pairs ({n_rgb} RGB, {n_depth} depth), {rgb.shape[2]}x{rgb.shape[1]}, "
           f"FoV_x {fov:.1f} Grad, gueltig {100 * (depth > 0).mean():.1f} % -> {a.out}")
 
 

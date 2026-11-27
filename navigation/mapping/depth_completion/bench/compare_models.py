@@ -64,7 +64,7 @@ def main():
     else:
         rgb = cv2.cvtColor(cv2.imread(a.image), cv2.COLOR_BGR2RGB)
         fov = a.fov_x
-    print(f"Bild {rgb.shape[1]}x{rgb.shape[0]}, FoV_x {fov if fov else 'vom Modell geschätzt'}")
+    print(f"image {rgb.shape[1]}x{rgb.shape[0]}, FoV_x {fov if fov else 'estimated by the model'}")
 
     runs = [((("MoGe-2-L" if m == "moge" else m) + f" {a.num_tokens} Tok.") if m.startswith("moge")
              else "DepthPro2-" + m.split("-")[1].upper(), m, a.num_tokens) for m in a.models]
@@ -88,7 +88,7 @@ def main():
             d = cv2.resize(d, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
         results.append((name, d, float(np.median(ts))))
         v = d[np.isfinite(d) & (d > 0)]
-        print(f"{name:16s} {model.dev.type:4s} {np.median(ts):7.0f} ms | Tiefe {np.percentile(v, 2):.2f}-"
+        print(f"{name:16s} {model.dev.type:4s} {np.median(ts):7.0f} ms | depth {np.percentile(v, 2):.2f}-"
               f"{np.percentile(v, 98):.2f} m | Rampen-Pixel {100 * ramp_fraction(d):5.2f} %")
         del model
         if torch.backends.mps.is_available():

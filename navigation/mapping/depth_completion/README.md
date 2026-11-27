@@ -1,42 +1,42 @@
-# Tiefenvervollständigung: Kinect-Tiefe mit einem KI-Modell auffüllen
+# Depth completion: filling Kinect depth with a learned model
 
-Die Azure Kinect misst Tiefe sehr genau, lässt aber viele Löcher: an Objektkanten, auf dunklen
-oder glänzenden Flächen, an Glas und jenseits ihrer Reichweite. In der Karte (nvblox) wären das
-Bereiche ohne Information. Schritt 3 der Pipeline (`depth_completion_node.py`) füllt diese
-Löcher. Dafür schätzt ein monokulares Tiefenmodell die Tiefe aus dem RGB-Bild, und diese
-Schätzung wird an die echten Messungen angepasst.
+The Azure Kinect measures depth very accurately but leaves many holes: at object edges, on dark
+or shiny surfaces, at glass and beyond its range. In the map (nvblox) these would be regions
+without information. Step 3 of the pipeline (`depth_completion_node.py`) fills these holes. A
+monocular depth model estimates the depth from the RGB image, and this estimate is fitted to the
+real measurements.
 
-Grundregeln:
+Ground rules:
 
-- **Gemessene Pixel bleiben immer unverändert.** Gefüllt werden nur Löcher.
-- **Im Zweifel bleibt ein Loch.** Ein fehlender Punkt ist für die Karte harmlos, ein falscher
-  Punkt in der Luft nicht.
+- **Measured pixels always stay unchanged.** Only holes are filled.
+- **When in doubt, a hole stays a hole.** A missing point is harmless for the map, a wrong point
+  floating in the air is not.
 
-![Ablauf](img/ablauf.svg)
+![Pipeline](img/pipeline.svg)
 
-| Schritt | Was passiert | Code |
+| Step | What happens | Code |
 |---|---|---|
-| Tiefenmodell | schätzt aus dem RGB-Bild eine metrische Tiefe für **jedes** Pixel | `depth_models.py` |
-| 1 Globaler Faktor | bringt die Schätzung grob auf den Maßstab der Messung | `depth_fusion.fill` |
-| 2 Gradienten-Fusion | passt die Schätzung lokal an die Messungen an, ohne ihre Form zu zerstören | `depth_fusion.GradientFusion` |
-| 3 Kantenfilter | verwirft gefüllte Pixel an Tiefenkanten, die als schwebende Punkte enden würden | `depth_fusion.jump_edges` |
+| Depth model | estimates a metric depth for **every** pixel from the RGB image | `depth_models.py` |
+| 1 Global scale | brings the estimate roughly to the scale of the measurement | `depth_fusion.fill` |
+| 2 Gradient fusion | fits the estimate locally to the measurements without destroying its shape | `depth_fusion.GradientFusion` |
+| 3 Edge filter | discards filled pixels at depth edges that would end up as floating points | `depth_fusion.jump_edges` |
 
-So läuft das an einer einzelnen Bildzeile ab: ein Objekt in 1,5 m vor einer Wand in 3 m, mit drei
-Löchern in der Messung (vereinfacht, 80 Pixel statt 1280):
+This is how it works on a single image row: an object at 1.5 m in front of a wall at 3 m, with
+three holes in the measurement (simplified, 80 pixels instead of 1280):
 
-![Die Schritte an einer Bildzeile](img/schritte.gif)
+![The steps on one image row](img/steps.gif)
 
 ## Installation
 
-Ein conda-Env für Knoten, Viewer und Benchmark mit allen Modellen, für Linux mit NVIDIA-GPU und
+One conda env for node, viewer and benchmark with all models, for Linux with an NVIDIA GPU and
 ROS 2 Jazzy.
 
-- Die Python-Version muss zur ROS-Distribution passen (Jazzy: 3.12), sonst lässt sich `rclpy`
-  nicht importieren.
-- numpy muss unter 2 bleiben, weil die ROS-Nachrichtentypen gegen numpy 1.x gebaut sind. MoGe wird
-  deshalb ohne Abhängigkeiten installiert, OpenCV unter 4.12 gehalten.
+- The Python version must match the ROS distribution (Jazzy: 3.12), otherwise `rclpy` cannot be
+  imported.
+- numpy must stay below 2, because the ROS message types are built against numpy 1.x. MoGe is
+  therefore installed without dependencies and OpenCV kept below 4.12.
 
-**1. Env anlegen**
+**1. Create the env**
 
 ```bash
 conda create -y -n depthcompletion python=3.12
@@ -46,13 +46,13 @@ conda create -y -n depthcompletion python=3.12
 conda activate depthcompletion
 ```
 
-**2. PyTorch** (CUDA-Version passend zum Treiber wählen, siehe `nvidia-smi` und pytorch.org)
+**2. PyTorch** (choose the CUDA version matching the driver, see `nvidia-smi` and pytorch.org)
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-**3. Gemeinsame Pakete** (inklusive `rerun-sdk` für den Viewer)
+**3. Common packages** (including `rerun-sdk` for the viewer)
 
 ```bash
 pip install "numpy<2" "opencv-python-headless<4.12" scipy trimesh "huggingface-hub>=1.0" click requests tqdm pillow matplotlib rosbags rerun-sdk
@@ -74,14 +74,14 @@ pip install --no-deps "git+https://github.com/microsoft/MoGe.git@74fbce054ebed49
 pip install "numpy<2" "git+https://github.com/apple-aiml-research/ml-depth-pro-2.git@aa389cbb0b74341664ed663a0966c859905cd6c0"
 ```
 
-**6. Optional: MoGe-3-Verfeinerung** (nur CUDA, braucht das CUDA-Toolkit; ohne läuft MoGe-3 mit
-seinem Basisnetz)
+**6. Optional: MoGe-3 refinement** (CUDA only, needs the CUDA toolkit; without it MoGe-3 runs with
+its base network)
 
 ```bash
 pip install --no-build-isolation "git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf"
 ```
 
-**7. Prüfen** (ROS gesourct, im Repo-Hauptordner)
+**7. Check** (ROS sourced, in the repository root)
 
 ```bash
 python -c "import torch, numpy, rclpy, sensor_msgs.msg; print(torch.cuda.is_available(), numpy.__version__)"
@@ -91,205 +91,214 @@ python -c "import torch, numpy, rclpy, sensor_msgs.msg; print(torch.cuda.is_avai
 python -c "import sys; sys.path.insert(0, 'navigation/mapping/depth_completion'); from depth_models import load_model; print(load_model('moge', 600).dev)"
 ```
 
-In einem bereits bestehenden Env fehlt für den neuen Viewer nur Rerun:
+In an existing env, the viewer only needs Rerun in addition:
 
 ```bash
 pip install rerun-sdk
 ```
 
-Der Viewer öffnet ein eigenes Rerun-Fenster und braucht deshalb einen Bildschirm. Ohne Bildschirm
-(z. B. per SSH) mit `--save f.rrd` aufzeichnen und die Datei später mit `rerun f.rrd` öffnen.
+The viewer opens its own Rerun window and therefore needs a display. Without a display (e.g. over
+SSH), record with `--save f.rrd` and open the file later with `rerun f.rrd`.
 
-Die Gewichte werden beim ersten Start geladen (`~/.cache/huggingface`,
-`~/.cache/torch/hub/checkpoints`). Im LN-Prozessmanager das Env-Python direkt eintragen
-(`<conda>/envs/depthcompletion/bin/python`), nicht `conda run`.
+The weights are downloaded on the first start (`~/.cache/huggingface`,
+`~/.cache/torch/hub/checkpoints`). In the LN process manager, enter the env's Python directly
+(`<conda>/envs/depthcompletion/bin/python`), not `conda run`.
 
-## Beispiel
+## Example
 
-Eine Aufnahme aus dem Labor (MoGe-2 B, 600 Tokens):
+A recording from the lab (MoGe-2 B, 600 tokens):
 
-![Beispiel](img/beispiel.jpg)
+![Example](img/example.jpg)
 
-1. **RGB**: das Kamerabild, aus dem das Modell schätzt.
-2. **Sensor**: Kinect-Tiefe. Schwarz sind Löcher, hier 37 % des Bildes. Oben fehlt alles
-   jenseits der Reichweite, dazu Löcher an den Rollstühlen und an Kanten.
-3. **Modell × globaler Faktor**: Die Schätzung deckt das ganze Bild ab, Kanten sind weich.
-4. **Gefüllt**: Messung plus gefüllte Löcher. Magenta sind die Pixel, die der Kantenfilter
-   verworfen hat, sie bleiben leer. Hier sind 95 % des Bildes gefüllt, 5 % verworfen.
+1. **RGB**: the camera image the model estimates from.
+2. **Sensor**: Kinect depth. Black are holes, here 37 % of the image. Everything beyond the range
+   is missing at the top, plus holes at the wheelchairs and at edges.
+3. **Model × global scale**: the estimate covers the whole image, edges are soft.
+4. **Completed**: measurement plus filled holes. Magenta are the pixels discarded by the edge
+   filter; they stay empty. Here 95 % of the image is filled and 5 % discarded.
 
-## Tiefenschätzung: welche Modelle es gibt
+## Depth estimation: available models
 
-Alle Modelle stecken hinter einer gemeinsamen Schnittstelle in `depth_models.py`:
+All models are behind one common interface in `depth_models.py`:
 
 ```python
 model = load_model("moge", num_tokens=600)
-depth = model(rgb, fov_x)   # RGB (H, W, 3) und Sichtfeld -> Tiefe [m] je Pixel, ungültig = inf
+depth = model(rgb, fov_x)   # RGB (H, W, 3) and field of view -> depth [m] per pixel, invalid = inf
 ```
 
-Das Modell bekommt das RGB-Bild und das horizontale Sichtfeld der Kamera. Das Sichtfeld wird
-aus der Brennweite in `camera_info` berechnet. Mit der echten Brennweite liefern die Modelle
-direkt **metrische** Tiefe in Metern, statt nur relative Tiefe. Wie die Netze intern
-funktionieren, spielt hier keine Rolle; wichtig ist nur, dass sie die Form der Szene gut treffen,
-Maßstab und Kanten aber nicht perfekt.
+The model gets the RGB image and the horizontal field of view of the camera. The field of view is
+computed from the focal length in `camera_info`. With the real focal length the models return
+**metric** depth in metres instead of only relative depth. How the networks work internally does
+not matter here; what matters is that they get the shape of the scene right, but scale and edges
+not perfectly.
 
-| Name | Modell | Paket | Hinweis |
+| Name | Model | Package | Note |
 |---|---|---|---|
-| `moge2-s` | MoGe-2 vits-normal | `moge` | am schnellsten |
-| `moge2-b` | MoGe-2 vitb-normal | `moge` | schnell, aber deutlich mehr grobe Fehler in großen Löchern |
-| **`moge`** | **MoGe-2 vitl** | `moge` | **Standard im ROS-Knoten** (600 Tokens, 29 Hz auf der A6000) |
-| `moge2-l-normal` | MoGe-2 vitl-normal | `moge` | wie `moge`, zusätzlich Normalen-Kopf |
-| `moge3-l` | MoGe-3 vitl | `moge` | Verfeinerung nur mit CUDA, sonst nur Basisnetz |
-| `depthpro2-s` | Apple Depth Pro 2 S | `depth_pro_2` | Gewichte nur für Forschung |
-| `depthpro2-b` | Apple Depth Pro 2 B | `depth_pro_2` | Gewichte nur für Forschung |
-| `depthpro2-l` | Apple Depth Pro 2 L | `depth_pro_2` | am genauesten, Gewichte nur für Forschung |
-| `depthpro2-h` | Apple Depth Pro 2 H+ | `depth_pro_2` | sehr groß (3,5 GB) |
+| `moge2-s` | MoGe-2 vits-normal | `moge` | fastest |
+| `moge2-b` | MoGe-2 vitb-normal | `moge` | fast, but clearly more gross errors in large holes |
+| **`moge`** | **MoGe-2 vitl** | `moge` | **default of the ROS node** (600 tokens, 29 Hz on the A6000) |
+| `moge2-l-normal` | MoGe-2 vitl-normal | `moge` | like `moge`, with an additional normal head |
+| `moge3-l` | MoGe-3 vitl | `moge` | refinement only with CUDA, otherwise base network only |
+| `depthpro2-s` | Apple Depth Pro 2 S | `depth_pro_2` | weights for research use only |
+| `depthpro2-b` | Apple Depth Pro 2 B | `depth_pro_2` | weights for research use only |
+| `depthpro2-l` | Apple Depth Pro 2 L | `depth_pro_2` | most accurate, weights for research use only |
+| `depthpro2-h` | Apple Depth Pro 2 H+ | `depth_pro_2` | very large (3.5 GB) |
 
-Laufzeit und Genauigkeit der Modelle: [bench/README.md](bench/README.md).
+Runtime and accuracy of the models: [bench/README.md](bench/README.md).
 
-Einstellungen:
+Settings:
 
-- **MoGe**: `num_tokens` bestimmt die Auflösung, mit der das Netz rechnet. Mehr Tokens heißt
-  langsamer, aber nicht zuverlässig genauer: Auf der A6000 des Roboters war MoGe-2 L mit 600
-  Tokens genauer als mit 1200 oder 2400. Die Ausgabe hat immer die volle Bildgröße.
-- **Depth Pro 2**: rechnet immer in voller Auflösung und läuft standardmäßig im
-  **Stream-Modus**: Das Modell sieht zusätzlich die Bilder davor (Fenster `STREAM_WINDOW`, Standard
-  4 inklusive des aktuellen) und wird dadurch zeitlich ruhiger. Das kostet Rechenzeit; auf dem
-  M4 Pro braucht Depth Pro 2 S 184 ms statt 134 ms pro Bild, mit Fenster 16 sind es 312 ms. Dafür
-  halbiert der Stream-Modus das Flackern der gefüllten Tiefe bei stillstehender Kamera: 1,91 %
-  (Einzelbild) → 0,89 % (Fenster 4) → 0,80 % (Fenster 16), weniger als bei MoGe-2
-  (1,2–1,5 %). Die Genauigkeit bleibt mit Fenster 4 gleich (große Löcher 1,67 % statt 1,64 %),
-  mit Fenster 16 sinkt sie leicht (1,79 %, mehr grobe Fehler). Einzelbilder: im Knoten
-  `STREAM = False`, im Viewer `--per-frame`. Der Offline-Benchmark rechnet für vergleichbare Zahlen
-  standardmäßig Einzelbilder (Stream mit `--stream`).
-- **Auswahl**: im ROS-Knoten oben `MODEL`, `NUM_TOKENS`, `STREAM`, `STREAM_WINDOW`, im Viewer
-  `--model`, `--num-tokens`, `--per-frame`, `--window`.
+- **MoGe**: `num_tokens` sets the resolution the network works at. More tokens means slower, but
+  not reliably more accurate: on the robot's A6000, MoGe-2 L was more accurate with 600 tokens
+  than with 1200 or 2400. The output always has the full image size.
+- **Depth Pro 2**: always works at full resolution and runs in **streaming mode** by default: the
+  model also sees the previous images (window `STREAM_WINDOW`, default 4 including the current
+  one) and becomes steadier over time. This costs time; on the M4 Pro, Depth Pro 2 S needs
+  184 ms instead of 134 ms per image, 312 ms with window 16. In return, streaming halves the
+  flicker of the completed depth with a static camera: 1.91 % (single frame) → 0.89 % (window
+  4) → 0.80 % (window 16), less than MoGe-2 (1.2–1.5 %). With window 4 the accuracy stays the
+  same (large holes 1.67 % instead of 1.64 %), with window 16 it drops slightly (1.79 %, more
+  gross errors). Single frames: `STREAM = False` in the node, `--per-frame` in the viewer. For
+  comparable numbers the offline benchmark uses single frames by default (streaming with
+  `--stream`).
+- **Selection**: at the top of the ROS node `MODEL`, `NUM_TOKENS`, `STREAM`, `STREAM_WINDOW`; in
+  the viewer `--model`, `--num-tokens`, `--per-frame`, `--window`.
 
-Pixel, die das Modell selbst als ungültig markiert (z. B. Himmel) oder die weiter als 50 m
-entfernt sind, bekommen `inf` und werden nicht gefüllt.
+Pixels the model itself marks as invalid (e.g. sky) or that are farther than 50 m get `inf` and
+are not filled.
 
-## Fusion: Schätzung an die Messung anpassen
+## Fusion: fitting the estimate to the measurement
 
-Die Modelltiefe M hat zwei typische Fehler. Ihr **Maßstab** liegt ein paar Prozent daneben, und
-das nicht überall gleich: Ein Objekt kann 5 % zu nah, die Wand dahinter 4 % zu fern sein. Die
-**Form** dagegen (welche Fläche eben ist, wo eine Kante ist) trifft sie gut. Die Fusion nimmt
-deshalb die Form vom Modell und den Maßstab von der Messung.
+The model depth M has two typical errors. Its **scale** is off by a few percent, and not by the
+same amount everywhere: an object can be 5 % too close and the wall behind it 4 % too far. Its
+**shape** (which surface is flat, where an edge is), on the other hand, is good. The fusion
+therefore takes the shape from the model and the scale from the measurement.
 
-### Schritt 1: globaler Faktor
+### Step 1: global scale
 
-Der Median von Messung/Modell über alle Pixel, an denen beides vorhanden ist, ergibt einen
-Faktor s. Er wird über die Zeit geglättet (`ema = 0.3`), damit er nicht springt. Danach stimmt
-die Schätzung im Mittel, aber noch nicht lokal.
+The median of measurement/model over all pixels where both exist gives a factor s. It is smoothed
+over time (`ema = 0.3`) so that it does not jump. After this the estimate is right on average,
+but not yet locally.
 
-### Schritt 2: Gradienten-Fusion mit Korrekturfeld
+### Step 2: gradient fusion with a correction field
 
-Gesucht ist ein Korrekturfeld c, mit dem das gefüllte Bild D = M · exp(c) ist. Die Rechnung läuft
-in log-Tiefe, so ist c ein relativer Faktor: c = 0,05 heißt 5 % weiter weg. c soll drei Dinge
-gleichzeitig erfüllen:
+We look for a correction field c such that the completed image is D = M · exp(c). The computation
+runs in log depth, so c is a relative factor: c = 0.05 means 5 % farther away. c has to satisfy
+three things at the same time:
 
-1. **Messung treffen**: Wo die Kinect misst, soll c ≈ r = log Z − log M sein.
-2. **Glatt entlang von Flächen**: Benachbarte Pixel sollen fast dasselbe c haben, aber **nicht
-   über Kanten** des Modells hinweg. An einer Kante wird die Kopplung schwach
-   (Gewicht exp(−|Δ log M| / `sigma_edge`)), das Objekt bekommt also seine eigene Korrektur und
-   die Wand ihre eigene.
-3. **Abklingen**: Ohne Messungen in der Nähe wird c langsam zu 0 gezogen, jenseits der
-   Reichweite stärker. Dort bleibt dann die Modelltiefe mit globalem Faktor.
+1. **Match the measurement**: where the Kinect measures, c ≈ r = log Z − log M.
+2. **Smooth along surfaces**: neighbouring pixels should have almost the same c, but **not across
+   edges** of the model. At an edge the coupling becomes weak (weight
+   exp(−|Δ log M| / `sigma_edge`)), so the object gets its own correction and the wall its own.
+3. **Decay**: without measurements nearby, c is slowly pulled to 0, more strongly beyond the
+   range. There the model depth with the global scale remains.
 
-Das ist ein lineares Ausgleichsproblem. Am besten sieht man es an einer einzelnen Bildzeile. Die
-Kurven unten sind mit genau dieser Gleichung gerechnet, nicht gezeichnet:
+This is a linear least-squares problem. It is easiest to see on a single image row. The curves
+below are computed with exactly this equation, not drawn:
 
 ![Fusion](img/fusion.svg)
 
-- **a)** Das Modell (violett) hat die richtige Form, liegt aber beim Objekt zu nah und bei der
-  Wand zu fern. Die Kinect (grün) hat ein Loch im Objekt (gelb) und misst rechts nichts mehr
-  (grau).
-- **b)** Grün ist, um wie viel das Modell an jeder Messung danebenliegt (r). Die Lösung c (orange)
-  folgt diesen Punkten. Im Loch wird sie glatt überbrückt, an der Objektkante springt sie mit,
-  und rechts klingt sie auf 0 ab.
-- **c)** Ergebnis: Die Messung bleibt, das Loch im Objekt wird bis auf unter 1 % genau gefüllt
-  (ohne Korrektur wären es 9,5 % Fehler). Rechts, ohne jede Messung in der Nähe, bleibt der
-  Modellfehler stehen; dort kann keine Fusion etwas korrigieren.
+- **a)** The model (violet) has the right shape but is too close at the object and too far at the
+  wall. The Kinect (green) has a hole in the object (yellow) and measures nothing on the right
+  (grey).
+- **b)** Green is how far the model is off at each measurement (r). The solution c (orange)
+  follows these points. In the hole it is bridged smoothly, at the object edge it jumps along,
+  and on the right it decays to 0.
+- **c)** Result: the measurement stays, the hole in the object is filled to within 1 % (without
+  correction the error would be 9.5 %). On the right, without any measurement nearby, the model
+  error remains; no fusion can correct it there.
 
-Umsetzung (`GradientFusion`):
+Implementation (`GradientFusion`):
 
-- Gerechnet wird auf einem Gitter mit halber Auflösung (`down = 2`). Jede Gitterzelle bekommt
-  ein Messgewicht aus Abdeckung, Sensorgenauigkeit (fällt ab 4 m mit 1/z² ab), Streuung in der
-  Zelle (Kanten) und Ausreißerprüfung gegen den Median.
-- Gelöst wird mit vorkonditioniertem CG (konjugierte Gradienten) auf der GPU, 40 Iterationen.
-  Startwert ist das c des letzten Frames, das beschleunigt im Live-Betrieb.
-- Ein zweiter Durchgang mit Huber-Gewichten dämpft einzelne falsche Messungen.
-- c wird kantentreu auf volle Auflösung gebracht: Beim Hochskalieren zählen nur Gitterpunkte
-  mit ähnlicher Modelltiefe, damit c nicht über Kanten verschmiert.
+- The computation runs on a grid with half the resolution (`down = 2`). Each grid cell gets a
+  measurement weight from coverage, sensor accuracy (drops with 1/z² beyond 4 m), spread within
+  the cell (edges) and an outlier check against the median.
+- It is solved with preconditioned CG (conjugate gradients) on the GPU, 40 iterations. The start
+  value is the c of the last frame, which speeds up live operation.
+- A second pass with Huber weights damps individual wrong measurements.
+- c is brought to full resolution edge-preserving: when upsampling, only grid points with a
+  similar model depth count, so that c does not smear across edges.
 
-| Parameter | Standard | Bedeutung |
+| Parameter | Default | Meaning |
 |---|---|---|
-| `down` | 2 | Gitterverkleinerung |
-| `lam` | 1.0 | Stärke der Glattheit |
-| `sigma_edge` | 0.05 | ab welchem Sprung in log M eine Kante die Kopplung löst |
-| `mu_near`, `mu_far`, `far_band` | 1e-4, 0.005, 0.15 | Abklingen nah / hinter dem Messbereich |
-| `z_ref` | 4.0 m | ab hier sinkt das Vertrauen in die Messung mit 1/z² |
-| `outlier` | 1.0 | Ausreißerschwelle (log-Einheiten) |
-| `iters` | 40 | CG-Iterationen |
+| `down` | 2 | grid downsampling |
+| `lam` | 1.0 | strength of the smoothness |
+| `sigma_edge` | 0.05 | jump in log M at which an edge releases the coupling |
+| `mu_near`, `mu_far`, `far_band` | 1e-4, 0.005, 0.15 | decay near / behind the measured range |
+| `z_ref` | 4.0 m | beyond this, trust in the measurement drops with 1/z² |
+| `outlier` | 1.0 | outlier threshold (log units) |
+| `iters` | 40 | CG iterations |
 
-### Schritt 3: Kantenfilter gegen schwebende Punkte
+### Step 3: edge filter against floating points
 
-Das Modell zeichnet einen Tiefensprung nicht als Stufe, sondern als **weiche Rampe** über 10 bis
-30 Pixel, wie ein unscharfes Foto. Genau an Kanten misst die Kinect oft nichts. Ohne Filter würde
-die Rampe eingefüllt: Werte wie 1,9 m oder 2,4 m zwischen einem Objekt in 1,5 m und der Wand in
-3 m. In der Karte sind das Punkte, die zwischen Objekt und Wand in der Luft schweben
-(Kanten-Bleeding).
+The model does not draw a depth jump as a step but as a **soft ramp** over 10 to 30 pixels, like
+a blurred photo. Exactly at edges the Kinect often measures nothing. Without a filter the ramp
+would be filled in: values such as 1.9 m or 2.4 m between an object at 1.5 m and the wall at 3 m.
+In the map these are points floating in the air between object and wall (edge bleeding).
 
-Der Filter macht drei einfache Schritte: **Kante finden → Zone um die Kante → dort nichts
-füllen.**
+The filter does three simple steps: **find the edge → zone around the edge → fill nothing
+there.**
 
-1. **Kante finden**: In der korrigierten Modelltiefe wird für jedes Pixel geschaut, wie stark
-   sich 1/Tiefe im 5×5-Fenster ändert. Springt sie um mehr als `edge_jump` (0,015 1/m), liegt
-   dort eine Kante. Der Sprung von 1,5 m auf 3 m ist in 1/Tiefe 0,67 → 0,33, also weit darüber.
-2. **Zone**: Die Kante wird um `edge_grow` (4 px) aufgebläht, damit auch die flachen Enden der
-   Rampe dazugehören.
-3. **Nicht füllen**: Gefüllte Pixel in der Zone werden verworfen und bleiben leer. Gemessene
-   Pixel bleiben immer.
+1. **Find the edge**: in the corrected model depth, each pixel checks how much 1/depth changes in
+   its 5×5 window. If it jumps by more than `edge_jump` (0.015 1/m), there is an edge. The jump
+   from 1.5 m to 3 m is 0.67 → 0.33 in 1/depth, far above.
+2. **Zone**: the edge is dilated by `edge_grow` (4 px), so that the flat ends of the ramp are
+   included.
+3. **Do not fill**: filled pixels in the zone are discarded and stay empty. Measured pixels
+   always stay.
 
-![Kantenfilter](img/kantenfilter.svg)
+![Edge filter](img/edge_filter.svg)
 
-**Warum 1/Tiefe und nicht die Tiefe selbst?** Der Boden läuft flach von der Kamera weg. In der
-Tiefe wird er nach hinten immer steiler, ein fester Schwellwert würde den fernen Boden als Kante
-verwerfen. In 1/Tiefe ist jede ebene Fläche eine Gerade: Der Boden ist in jeder Entfernung gleich
-steil und bleibt unter der Schwelle, nur echte Kanten springen darüber.
+**Why 1/depth and not the depth itself?** The floor runs flat away from the camera. In depth it
+gets steeper and steeper with distance, and a fixed threshold would discard the distant floor as
+an edge. In 1/depth every planar surface is a straight line: the floor is equally steep at every
+distance and stays below the threshold; only real edges jump above it.
 
-![Warum 1/z](img/warum_1_durch_z.svg)
+![Why 1/z](img/why_inverse_depth.svg)
 
-So sieht das in 3D von oben aus. Grau ist gemessen, blau gefüllt, der Boden ist ausgeblendet:
+This is what it looks like in 3D from above. Grey is measured, blue filled, the floor is hidden:
 
-![Draufsicht](img/draufsicht.png)
+![Top view](img/top_view.png)
 
-Ohne Filter (links) hängen Schleier aus gefüllten Punkten zwischen den Objekten und der Wand.
-Mit Filter (rechts) sind sie weg; die gefüllten Flächen in den Objekten bleiben.
+Without the filter (left), veils of filled points hang between the objects and the wall. With the
+filter (right) they are gone; the filled surfaces inside the objects remain.
 
-**Grenzen**
+**Limits**
 
-- In der Zone um Kanten bleibt die Tiefe leer. Von den Löchern direkt an Tiefenkanten wird etwa
-  ein Fünftel gefüllt (21 %). Ein kleiner Rest bleibt: 0,04 % der Kantenpixel werden noch
-  mit mehr als 10 % Fehler gefüllt. Mit `edge_grow=8` sind es 0 %, dafür werden 7 Prozentpunkte
-  weniger der echten Löcher gefüllt.
-- Sehr nahe Flächen, auf die man fast genau von der Seite schaut (z. B. eine Wand, an der der
-  Roboter in weniger als ~0,5 m Abstand entlangfährt), ändern sich in 1/Tiefe ebenfalls stark
-  und werden als Kante verworfen. Links in der Draufsicht fällt eine schräg gesehene Fläche weg,
-  vermutlich so ein Fall.
+- In the zone around edges the depth stays empty. Of the holes directly at depth edges, about one
+  fifth is filled (21 %). A small residue remains: 0.04 % of the edge pixels are still filled with
+  more than 10 % error. With `edge_grow=8` it is 0 %, but 7 percentage points fewer of the real
+  holes are filled.
+- Very close surfaces seen almost exactly from the side (e.g. a wall the robot drives along at
+  less than ~0.5 m) also change strongly in 1/depth and are discarded as an edge. On the left of
+  the top view, a surface seen at a grazing angle disappears, probably such a case.
 
-| Parameter | Standard | Bedeutung |
+| Parameter | Default | Meaning |
 |---|---|---|
-| `edge_jump` | 0.015 1/m | ab welchem Sprung in 1/Tiefe (im 5×5-Fenster) eine Kante vorliegt, 0 = Filter aus |
-| `edge_grow` | 4 px | Breite der Zone um eine Kante, in der nichts gefüllt wird (8 px: kein Bleeding mehr, aber weniger Fläche) |
+| `edge_jump` | 0.015 1/m | jump in 1/depth (in the 5×5 window) above which there is an edge, 0 = filter off |
+| `edge_grow` | 4 px | width of the zone around an edge in which nothing is filled (8 px: no bleeding, but less area) |
 
-## Code und Werkzeuge
+## ROS node
 
-| Datei | Inhalt |
+`depth_completion_node.py` follows the communication rules of the pipeline
+([../README.md](../README.md#communication)): one thread, no timer, the raw depth is the trigger.
+It keeps the last colour image and the last depth image and processes a frame as soon as both
+have the same stamp. It publishes only `/camera/completed/depth/image_raw`; colour and
+`camera_info` are taken from the bridge by the later stages. Every 5 s it logs:
+
+```
+completion: in 14.2 Hz | out 8.1 Hz | latency 180 ms | convert 0.6 | model 53.0 | fusion 12.1 | publish 1.4 ms
+```
+
+## Code and tools
+
+| File | Content |
 |---|---|
-| `depth_models.py` | Modelle, `load_model(name)` |
-| `depth_fusion.py` | `fill` (Schritte 1–3), `global_scale`, `GradientFusion`, `jump_edges` |
-| `depth_completion_node.py` | ROS-Knoten (Schritt 3 der Pipeline) |
-| `viewer.py` | Rerun-Fenster: RGB, Sensor-, Modell- und gemergte Tiefe plus je eine 3D-Punktwolke; live über ROS oder offline mit `--frames f.npz`. Verworfene Pixel magenta, gefüllte Punkte in RGB (mit `--mark-filled` orange), Filter mit `--set edge_jump=0` abschaltbar, `--eval` zeigt den Fehler unter 3 m als Kurve |
-| `bench/` | Offline-Benchmark ohne ROS mit eigener Doku und allen Messergebnissen: [bench/README.md](bench/README.md) |
+| `depth_models.py` | models, `load_model(name)` |
+| `depth_fusion.py` | `fill` (steps 1–3), `global_scale`, `GradientFusion`, `jump_edges` |
+| `depth_completion_node.py` | ROS node (step 3 of the pipeline) |
+| `viewer.py` | Rerun window: RGB, sensor, model and merged depth plus one 3D point cloud each; live via ROS or offline with `--frames f.npz`. Discarded pixels magenta, filled points in RGB (orange with `--mark-filled`), filter switchable with `--set edge_jump=0`, `--eval` shows the error below 3 m as a curve |
+| `bench/` | offline benchmark without ROS, with its own documentation and all results: [bench/README.md](bench/README.md) |
 
 ```bash
 python navigation/mapping/depth_completion/viewer.py --model moge --num-tokens 600

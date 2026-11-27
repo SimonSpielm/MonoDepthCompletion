@@ -2,15 +2,19 @@
 Step 2: LN -> ROS camera bridge.
 
 Reads the LN camera topics (from the real camera driver or ln_camera_publisher.py)
-and publishes them unchanged as ROS messages. All messages of one frame carry the
+and publishes them unchanged as ROS messages. Both images of one frame carry the
 LN capture timestamp as header.stamp; it is passed through the whole pipeline.
 
-    LN camera.perception/rgb    -> /camera/color/image_raw    (rgb8)
-    LN camera.perception/depth  -> /camera/depth/image_raw    (16UC1, mm)
-    LN camera.perception/cam_k  -> /camera/color/camera_info, /camera/depth/camera_info
+    LN camera.perception/rgb    -> /camera/color/image_raw    (rgb8, qos_buffer)
+    LN camera.perception/depth  -> /camera/depth/image_raw    (16UC1, mm, qos_trigger)
+    LN camera.perception/cam_k  -> /camera/color/camera_info  (latched, sent once)
+
+The depth is registered to the colour camera, so both images share one K and one
+camera_info. Colour is published before depth, so a stage triggered by the depth
+usually has the matching colour image already. QoS rules: pipeline_io.py.
 
 No timer: inport.read() blocks until the next packet, so frames are forwarded as
-soon as they arrive.
+soon as they arrive. Single thread.
 
 Usage:
     python3 -m navigation.mapping.ln_ros_camera_bridge
@@ -29,6 +33,8 @@ import rclpy
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CameraInfo, Image
 
+from navigation.mapping.pipeline_io import (COLOR_TOPIC, DEPTH_TOPIC, INFO_TOPIC, StageMonitor, qos_buffer,
+                                            qos_latched, qos_trigger)
 from navigation.mapping.ros_utils import to_ros_time
 
 FRAME_CAM = "camera"
@@ -39,10 +45,9 @@ class LnRosCameraBridge:
         self.node = node
         self.bridge = CvBridge()
 
-        self.pub_color = self.node.create_publisher(Image, "camera/color/image_raw", 1)
-        self.pub_depth = self.node.create_publisher(Image, "camera/depth/image_raw", 1)
-        self.pub_color_info = self.node.create_publisher(CameraInfo, "camera/color/camera_info", 1)
-        self.pub_depth_info = self.node.create_publisher(CameraInfo, "camera/depth/camera_info", 1)
+        self.pub_color = self.node.create_publisher(Image, COLOR_TOPIC, qos_buffer())
+        self.pub_depth = self.node.create_publisher(Image, DEPTH_TOPIC, qos_trigger())
+        self.pub_info = self.node.create_publisher(CameraInfo, INFO_TOPIC, qos_latched())
 
         self.ln_clnt = ln.client("LnRosCameraBridge", [])
         self.ln_inport_rgb = self.ln_clnt.subscribe("camera.perception/rgb", "perception/rgb")
@@ -53,9 +58,8 @@ class LnRosCameraBridge:
         self.info_msg = self.get_camera_info_from_camk(FRAME_CAM)  # color and depth share K (registered depth)
 
         self._last_ts = None
-        self._frames = 0
-        self._skipped = 0
-        self._last_update = time.time()
+        self._info_sent = False
+        self.monitor = StageMonitor(self.node.get_logger().info, "bridge")
         self.node.get_logger().info("Init done...")
 
     def get_camera_info_from_camk(self, frame_id: str) -> CameraInfo:
@@ -93,13 +97,14 @@ class LnRosCameraBridge:
             msg.header.stamp = stamp
             msg.header.frame_id = FRAME_CAM
 
-        self.info_msg.header.stamp = stamp
-        self.info_msg.height, self.info_msg.width = rgb.shape[:2]
+        if not self._info_sent:              # static: once, latched
+            self.info_msg.header.stamp = stamp
+            self.info_msg.height, self.info_msg.width = rgb.shape[:2]
+            self.pub_info.publish(self.info_msg)
+            self._info_sent = True
 
-        self.pub_color.publish(rgb_msg)
+        self.pub_color.publish(rgb_msg)      # colour first, see module docstring
         self.pub_depth.publish(depth_msg)
-        self.pub_color_info.publish(self.info_msg)
-        self.pub_depth_info.publish(self.info_msg)
 
     def run(self):
         self.node.get_logger().info("Bridging LN camera to ROS...")
@@ -108,22 +113,14 @@ class LnRosCameraBridge:
             if depth is None:
                 self.node.get_logger().warning("Failed to read RGB or depth.")
                 continue
+            self.monitor.received()
             if ts == self._last_ts:
-                self._skipped += 1
+                self.monitor.count("duplicates")
                 continue
+            t0 = time.perf_counter()
             self.publish_rgbd(rgb, depth, ts)
             self._last_ts = ts
-            self._frames += 1
-
-            now = time.time()
-            elapsed = now - self._last_update
-            if elapsed >= 5.0:
-                self.node.get_logger().info(
-                    f"Published with {self._frames / elapsed:.2f} Hz "
-                    f"(frames {self._frames}, skipped duplicate stamps {self._skipped})")
-                self._frames = 0
-                self._skipped = 0
-                self._last_update = now
+            self.monitor.published(to_ros_time(ts), publish=1000 * (time.perf_counter() - t0))
 
 
 def main():

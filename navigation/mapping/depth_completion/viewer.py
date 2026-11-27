@@ -66,8 +66,9 @@ def live_frames(a):
     """Newest RGB/depth pair from ROS 2 with the intrinsics of the latest camera_info."""
     import rclpy
     from message_filters import ApproximateTimeSynchronizer, Subscriber
-    from rclpy.qos import qos_profile_sensor_data
     from sensor_msgs.msg import CameraInfo, Image
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from pipeline_io import qos_buffer, qos_latched, qos_trigger   # QoS of the pipeline
 
     def to_rgb(msg):
         ch = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4}[msg.encoding]
@@ -90,12 +91,11 @@ def live_frames(a):
         with lock:
             state["pair"] = (c, d)
 
-    subs = [Subscriber(node, Image, a.color, qos_profile=qos_profile_sensor_data),
-            Subscriber(node, Image, a.depth, qos_profile=qos_profile_sensor_data)]
+    subs = [Subscriber(node, Image, a.color, qos_profile=qos_buffer()),
+            Subscriber(node, Image, a.depth, qos_profile=qos_trigger())]
     sync = ApproximateTimeSynchronizer(subs, queue_size=5, slop=0.02)
     sync.registerCallback(on_pair)
-    node.create_subscription(CameraInfo, a.info, lambda m: state.__setitem__("info", m),
-                             qos_profile_sensor_data)
+    node.create_subscription(CameraInfo, a.info, lambda m: state.__setitem__("info", m), qos_latched())
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
     try:
         while rclpy.ok():

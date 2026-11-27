@@ -1,9 +1,9 @@
 """
 Step 4: Camera frame filter (former Azure Kinect interface, processing part).
 
-Subscribes the completed camera frame of depth_completion/depth_completion_node.py (or, with
---depth_source raw / --raw, the raw frame of ln_ros_camera_bridge.py), filters it
-and publishes:
+Triggered by the completed depth of depth_completion/depth_completion_node.py (or, with
+--depth_source raw / --raw, the raw depth of ln_ros_camera_bridge.py), filters it and
+publishes:
 
     /tf                                map -> Wt (odometry at the frame timestamp),
                                        Wt -> ground, Wt -> camera
@@ -25,6 +25,12 @@ The frame's header.stamp is the original LN capture timestamp. It is used to loo
 odometry and joint angles in the SynchronizationBuffer, and all outputs (incl. TF)
 are stamped with it, so nvblox / octomap find the camera pose of exactly this frame.
 
+Communication (rules in pipeline_io.py): one thread, no timer, no synchroniser. Each new depth
+image is processed in its callback; while it is busy, DDS keeps only the newest depth image.
+camera_info comes latched from the bridge. The colour image (only for --mask_humans) comes
+directly from the bridge and is looked up by stamp (ColorByStamp); it arrives earlier than the
+completed depth. If it is missing, the depth waits until it arrives or a newer depth replaces it.
+
 Usage:
     python3 -m navigation.mapping.camera_frame_filter --mask_humans --filter_robot
 """
@@ -42,8 +48,6 @@ import numpy as np
 import rclpy
 import tf2_ros
 from cv_bridge import CvBridge
-from message_filters import Subscriber, TimeSynchronizer
-from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 
@@ -51,6 +55,8 @@ import links_and_nodes as ln
 from robotutils.geom.se3 import euler2tf, simulink2tf
 
 from navigation.mapping.arm_filter import SelfFilter, depth_to_pointcloud
+from navigation.mapping.pipeline_io import (COMPLETED_DEPTH_TOPIC, DEPTH_TOPIC, FILTERED_DEPTH_TOPIC, INFO_TOPIC,
+                                            ColorByStamp, StageMonitor, qos_latched, qos_trigger)
 from navigation.mapping.ros_utils import tf_from_matrix, to_sec
 from navigation.mapping.synchronization_buffer import SynchronizationBuffer_LnInterface
 
@@ -61,11 +67,7 @@ HUMAN_PADDING = 100 #px
 NOINFO_BEHAVIOUR = 0 #65535 #0
 EDGE_REL_THRESH = 0.1  # flying pixels: depth range in 3x3 > 10 % of the depth -> drop, 0 = off
 
-INPUT_TOPICS = {
-    "completed": ("camera/completed/color/image_raw", "camera/completed/depth/image_raw",
-                  "camera/completed/camera_info"),
-    "raw": ("camera/color/image_raw", "camera/depth/image_raw", "camera/color/camera_info"),
-}
+DEPTH_SOURCES = {"completed": COMPLETED_DEPTH_TOPIC, "raw": DEPTH_TOPIC}
 
 
 def flying_pixel_mask(depth):
@@ -125,22 +127,20 @@ class CameraFrameFilter:
         self.c = None            # camera parameters, set from the first camera_info
         self.arm_filter = None   # needs self.c
 
-        self.pub_depth = self.node.create_publisher(Image, "camera/filtered/depth/image_raw", 1)
+        self.pub_depth = self.node.create_publisher(Image, FILTERED_DEPTH_TOPIC, qos_trigger())
         self.pub_pc = None
         if self.publish_pointcloud:
             self.pub_pc = self.node.create_publisher(PointCloud2, "camera/filtered/points", 1)
 
-        # The raw and completed topics belong to different frames. Exact time sync only
-        # works within one source, so --depth_source raw switches all three topics.
+        # Trigger: depth (see module docstring). Colour from the bridge only for --mask_humans.
         source = "raw" if (args.raw or args.depth_source == "raw") else "completed"
-        color_topic, depth_topic, info_topic = INPUT_TOPICS[source]
-        subs = [Subscriber(self.node, Image, color_topic, qos_profile=qos_profile_sensor_data),
-                Subscriber(self.node, Image, depth_topic, qos_profile=qos_profile_sensor_data),
-                Subscriber(self.node, CameraInfo, info_topic, qos_profile=qos_profile_sensor_data)]
-        self.sync = TimeSynchronizer(subs, queue_size=5)   # identical stamps per frame
-        self.sync.registerCallback(self.on_frame)
-
-        self._last_update = time.time()
+        depth_topic = DEPTH_SOURCES[source]
+        self.info_msg = None
+        self.pending_depth = None              # depth still waiting for its colour image
+        self.colors = ColorByStamp(self.node, on_arrival=self.on_color) if self.mask_humans else None
+        self.node.create_subscription(Image, depth_topic, self.on_depth, qos_trigger())
+        self.node.create_subscription(CameraInfo, INFO_TOPIC, self.on_info, qos_latched())
+        self.monitor = StageMonitor(self.node.get_logger().info, "filter")
         self.node.get_logger().info(
             f"Init done, depth source '{source}', pointcloud "
             f"{'ENABLED -> /camera/filtered/points' if self.publish_pointcloud else 'DISABLED (no --publish_pointcloud)'}, "
@@ -205,9 +205,27 @@ class CameraFrameFilter:
         depth[(ignore_mask)] = 0
         return depth
 
-    def on_frame(self, color_msg, depth_msg, info_msg):
+    def on_info(self, msg):
+        self.info_msg = msg
+
+    def on_color(self, _msg):
+        if self.pending_depth is not None and self.colors.get(self.pending_depth.header.stamp) is not None:
+            depth_msg, self.pending_depth = self.pending_depth, None
+            self.on_frame(depth_msg)
+
+    def on_depth(self, msg):
+        self.monitor.received()
+        if self.mask_humans and self.colors.get(msg.header.stamp) is None:
+            self.pending_depth = msg     # colour not here yet; a newer depth replaces it
+            return
+        self.on_frame(msg)
+
+    def on_frame(self, depth_msg):
+        t0 = time.perf_counter()
+        if self.info_msg is None:        # camera_info not received yet
+            return
         if self.c is None:
-            self.c = camera_params_from_info(info_msg)
+            self.c = camera_params_from_info(self.info_msg)
             if self.filter_robot:
                 self.arm_filter = SelfFilter(self.c, self.Wt_T_Cam, self.sync_buffer)
 
@@ -215,7 +233,9 @@ class CameraFrameFilter:
         ts = to_sec(header.stamp)
         self.publish_odometry(ts, header.stamp)
 
-        rgb = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding="rgb8")
+        rgb = None
+        if self.mask_humans:
+            rgb = self.bridge.imgmsg_to_cv2(self.colors.get(header.stamp), desired_encoding="rgb8")
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="16UC1").copy()
         depth = self.filter_depth(rgb, depth, ts)
 
@@ -227,11 +247,7 @@ class CameraFrameFilter:
             pointcloud, _ = depth_to_pointcloud(depth, self.c, ds=POINTCLOUD_DOWNSAMPLING)
             self.pub_pc.publish(point_cloud2.create_cloud_xyz32(header, pointcloud))
 
-        now = time.time()
-        self.node.get_logger().info(
-            f"Updated with: {round(1/max(now-self._last_update, 1e-6),2)}Hz, "
-            f"latency {now - ts:.3f}s", throttle_duration_sec=5.0)
-        self._last_update = now
+        self.monitor.published(header.stamp, filter=1000 * (time.perf_counter() - t0))
 
 
 def main():
