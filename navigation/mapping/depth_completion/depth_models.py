@@ -25,7 +25,9 @@ import torch
 MOGE = {"moge": "Ruicheng/moge-2-vitl",
         "moge2-s": "Ruicheng/moge-2-vits-normal",
         "moge2-b": "Ruicheng/moge-2-vitb-normal",
-        "moge3-l": "Ruicheng/moge-3-vitl"}
+        "moge2-l-normal": "Ruicheng/moge-2-vitl-normal",
+        "moge3-l": "Ruicheng/moge-3-vitl",
+        "moge3-g": "Ruicheng/moge-3-vitg"}
 DEPTHPRO = ("depthpro2-s", "depthpro2-b", "depthpro2-l", "depthpro2-h")
 MODELS = tuple(MOGE) + DEPTHPRO
 MAX_DEPTH = 50.0   # [m] anything beyond (sky) counts as invalid
@@ -36,10 +38,11 @@ def default_device():
         "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def load_model(name, num_tokens=1200, device=None, stream=True, window=4):
-    """num_tokens applies to MoGe only, stream to Depth Pro 2 only (default: streaming mode)."""
+def load_model(name, num_tokens=1200, device=None, stream=True, window=4, refine=None):
+    """num_tokens applies to MoGe only, refine to MoGe-3 only (refinement steps, None = 3 with
+    CUDA, else 0), stream/window to Depth Pro 2 only (default: streaming mode, window 4)."""
     if name in MOGE:
-        return MoGe(MOGE[name], num_tokens, device)
+        return MoGe(MOGE[name], num_tokens, device, refine)
     if name in DEPTHPRO:
         return DepthPro2(name, device, stream, window)
     raise ValueError(f"unknown model '{name}', available: {', '.join(MODELS)}")
@@ -53,16 +56,20 @@ def _invalid_to_inf(d):
 class MoGe:
     """MoGe-2 or MoGe-3. The field of view (fov_x) is passed in, so the depth is metric."""
 
-    def __init__(self, repo, num_tokens=1200, device=None):
+    def __init__(self, repo, num_tokens=1200, device=None, refine=None):
         self.dev = torch.device(device or default_device())
         self.num_tokens = num_tokens
         self.kw = {}
         load_kw = {}
         if "moge-3" in repo:
-            refine = self.dev.type == "cuda"
-            self.kw["refine_steps"] = 3 if refine else 0
-            if not refine:             # the refinement needs flex_gemm (CUDA/Triton)
-                _stub_flex_gemm()
+            if refine is None:
+                refine = 3 if self.dev.type == "cuda" else 0
+            self.kw["refine_steps"] = refine
+            if refine == 0:            # the refinement needs flex_gemm (CUDA/Triton)
+                try:
+                    import flex_gemm  # noqa: F401
+                except ImportError:
+                    _stub_flex_gemm()
                 load_kw = {"model_kwargs": {"refiner": None}}
             from moge.model.v3 import MoGeModel
         else:

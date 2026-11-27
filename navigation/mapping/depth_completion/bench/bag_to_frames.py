@@ -34,6 +34,32 @@ def image(m):
     return np.ascontiguousarray(img[..., ::-1] if m.encoding.startswith("bgr") else img)
 
 
+def read_bag(bag, max_pairs=60, step=1, color=COLOR, depth=DEPTH, info=INFO):
+    """RGB/depth pairs with identical stamps: (rgb (N,H,W,3) uint8, depth (N,H,W) [m], fov_x [deg])."""
+    rgbs, depths, fov = {}, {}, None
+    with AnyReader([Path(bag)], default_typestore=get_typestore(Stores.ROS2_JAZZY)) as r:
+        conns = [c for c in r.connections if c.topic in (color, depth, info)]
+        for c, _, raw in r.messages(connections=conns):
+            m = r.deserialize(raw, c.msgtype)
+            if c.topic == info:
+                if fov is None:
+                    k = getattr(m, "k", None)
+                    fx = float((k if k is not None else m.K)[0])
+                    fov = math.degrees(2 * math.atan(0.5 * m.width / fx))
+            elif c.topic == color:
+                rgbs[stamp(m)] = image(m)
+            else:
+                depths[stamp(m)] = image(m)
+    keys = sorted(set(rgbs) & set(depths))[::step][:max_pairs]
+    if not keys:
+        raise SystemExit(f"{bag}: keine RGB/Tiefe-Paare mit gleichem Zeitstempel gefunden")
+    rgb = np.stack([rgbs[k] for k in keys])
+    dep = np.stack([depths[k] for k in keys])
+    if dep.shape[1:] != rgb.shape[1:3]:
+        raise SystemExit(f"{bag}: Tiefe {dep.shape[1:]} nicht auf RGB {rgb.shape[1:3]} registriert")
+    return rgb, dep, (fov if fov else float("nan")), len(rgbs), len(depths)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("bag")
@@ -44,31 +70,9 @@ def main():
     ap.add_argument("--depth", default=DEPTH)
     ap.add_argument("--info", default=INFO)
     a = ap.parse_args()
-
-    rgbs, depths, fov = {}, {}, None
-    with AnyReader([Path(a.bag)], default_typestore=get_typestore(Stores.ROS2_JAZZY)) as r:
-        conns = [c for c in r.connections if c.topic in (a.color, a.depth, a.info)]
-        for c, _, raw in r.messages(connections=conns):
-            m = r.deserialize(raw, c.msgtype)
-            if c.topic == a.info:
-                if fov is None:
-                    k = getattr(m, "k", None)
-                    fx = float((k if k is not None else m.K)[0])
-                    fov = math.degrees(2 * math.atan(0.5 * m.width / fx))
-            elif c.topic == a.color:
-                rgbs[stamp(m)] = image(m)
-            else:
-                depths[stamp(m)] = image(m)
-
-    keys = sorted(set(rgbs) & set(depths))[:: a.step][: a.max]
-    if not keys:
-        raise SystemExit("keine RGB/Tiefe-Paare mit gleichem Zeitstempel gefunden")
-    rgb = np.stack([rgbs[k] for k in keys])
-    depth = np.stack([depths[k] for k in keys])
-    if depth.shape[1:] != rgb.shape[1:3]:
-        raise SystemExit(f"Tiefe {depth.shape[1:]} nicht auf RGB {rgb.shape[1:3]} registriert")
-    np.savez(a.out, rgb=rgb, depth=depth, fov_x=np.full(len(keys), fov if fov else np.nan))
-    print(f"{len(keys)} Paare ({len(rgbs)} RGB, {len(depths)} Tiefe), {rgb.shape[2]}x{rgb.shape[1]}, "
+    rgb, depth, fov, n_rgb, n_depth = read_bag(a.bag, a.max, a.step, a.color, a.depth, a.info)
+    np.savez(a.out, rgb=rgb, depth=depth, fov_x=np.full(len(rgb), fov))
+    print(f"{len(rgb)} Paare ({n_rgb} RGB, {n_depth} Tiefe), {rgb.shape[2]}x{rgb.shape[1]}, "
           f"FoV_x {fov:.1f} Grad, gueltig {100 * (depth > 0).mean():.1f} % -> {a.out}")
 
 

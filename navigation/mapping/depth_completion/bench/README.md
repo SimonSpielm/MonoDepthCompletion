@@ -10,6 +10,40 @@ Dasselbe conda-Env wie für den ROS-Knoten, siehe [../README.md](../README.md), 
 „Installation“. ROS wird für den Benchmark nicht gebraucht. Die Gewichte von Depth Pro 2 sind nur
 für nicht-kommerzielle Forschung freigegeben.
 
+## Testsuite auf dem Roboter-PC (`run_suite.py`)
+
+Lässt alle Modellkonfigurationen auf aufgenommenen Szenen laufen und schreibt einen Bericht zur
+Auswertung. Gemessen wird pro Konfiguration: Laufzeit (Modell, Füllung, gesamt, Hz), GPU-Speicher,
+Genauigkeit (32- und 128-px-Löcher, grobe Fehler, Kantenband) und Flackern bei stillstehender
+Kamera. Standard-Raster (`--list`, 27 Konfigurationen):
+
+- MoGe-2 S, B, L, L-normal mit 600, 1200 und 2400 Tokens
+- MoGe-3 L mit Verfeinerung (600, 1200, 2400 Tokens) und ohne (1200), MoGe-3 G (600, 1200)
+- Depth Pro 2 S, B, L, jeweils Einzelbild, Stream Fenster 4 und 16 (H mit `--with-h`)
+
+Erst ein kurzer Durchlauf (5 Konfigurationen, etwa 10 Minuten), dann alles (eher 1–2 Stunden).
+Die ROS-Pipeline dabei nicht laufen lassen, sie teilt sich die GPU.
+
+```bash
+python run_suite.py --quick --bags ~/Desktop/rosbags/depth_estimation ~/Desktop/rosbags/octomap/octomap ~/Desktop/rosbags/local_map/azure_kinect
+```
+
+```bash
+python run_suite.py --bags ~/Desktop/rosbags/depth_estimation ~/Desktop/rosbags/octomap/octomap ~/Desktop/rosbags/local_map/azure_kinect
+```
+
+- Bags werden einmal nach `~/depth_suite_data` umgewandelt (30 aufeinanderfolgende Frames, `--n`,
+  `--step`). ROS-1-Bags (`.bag`) gehen auch.
+- Der Bericht landet in `bench/reports/<rechner>_<zeit>/`: `report.md` (Tabelle), `summary.csv`,
+  `results.jsonl` (inklusive Werten pro Aufnahme und Fehlermeldungen), `env.json` (GPU, Treiber,
+  Versionen, Commit), `suite.log`.
+- Bricht der Lauf ab, setzt `--resume bench/reports/<ordner>` an der Stelle fort.
+- Einzelne Konfigurationen: `--only moge2-b:600 moge3-l:1200:refine3 depthpro2-s:stream4`.
+- MoGe-3 mit Verfeinerung braucht `flex_gemm` (Installation Schritt 6); fehlt es, werden diese
+  Konfigurationen als fehlgeschlagen protokolliert und der Rest läuft weiter.
+
+Zur Auswertung den Berichtsordner committen und pushen, oder gezippt schicken.
+
 ## Daten
 
 | Quelle | Woher | Wofür |
